@@ -1,0 +1,20 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    # sqlc reads the goose migrations to learn the schema, so a query that
+    # references a column no migration created fails at generate time.
+    schema: "migrations"
+    queries: "internal/db/queries"
+    gen:
+      go:
+        package: "sqlc"
+        out: "internal/db/sqlc"
+        sql_package: "pgx/v5"
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # pgx/v5 maps timestamptz to pgtype.Timestamptz by default; every
+          # such column here is NOT NULL, so plain time.Time is accurate and
+          # keeps pgtype out of the domain types.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
