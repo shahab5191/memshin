@@ -1,33 +1,48 @@
 package main
 
 import (
+	"context"
+	"log"
+	"net"
+	"net/url"
 	"os"
 
+	"github.com/joho/godotenv"
 	"github.com/shahab5191/memshin/internal/db"
 )
 
 func buildDSN() string {
-	// read from environment variables or .env file
-	// first load .env file if exists.
 	host := os.Getenv("POSTGRES_HOST")
 	port := os.Getenv("POSTGRES_PORT")
 	user := os.Getenv("POSTGRES_USER")
 	password := os.Getenv("POSTGRES_PASSWORD")
 	dbname := os.Getenv("POSTGRES_DB")
+	sslmode := os.Getenv("POSTGRES_SSLMODE")
 
-	if host == "" || port == "" || user == "" || password == "" || dbname == "" {
-		panic("Database connection details are not set in environment variables")
+	if host == "" || port == "" || user == "" || password == "" || dbname == "" || sslmode == "" {
+		panic("Database configuration is not set properly in environment variables or .env file")
 	}
 
-	dsn := "postgres://" + user + ":" + password + "@" + host + ":" + port + "/" + dbname + "?sslmode=disable"
-	return dsn
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     net.JoinHostPort(host, port),
+		Path:     dbname,
+		RawQuery: "sslmode=" + sslmode,
+	}
+	return u.String()
 }
 
 func main() {
-	dsn := "postgres://username:password@localhost:5432/mydb?sslmode=disable"
-	db, err := db.Connect(dsn)
+	_ = godotenv.Load()
+
+	ctx := context.Background()
+
+	pool, err := db.Connect(ctx, buildDSN())
 	if err != nil {
 		panic(err)
 	}
-	defer db.Close()
+	defer pool.Close()
+
+	log.Println("connected to database")
 }

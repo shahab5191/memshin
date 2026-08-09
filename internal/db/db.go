@@ -1,22 +1,22 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Connect(dsn string) (*sql.DB, error) {
-	db, err := sql.Open("pgx", dsn)
+func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("open database pool: %w", err)
 	}
 
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
 	}
 
-	fmt.Println("Successfully connected to the database")
-	return db, nil
+	return pool, nil
 }
