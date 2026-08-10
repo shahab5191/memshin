@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 
 	"github.com/joho/godotenv"
+	"github.com/shahab5191/memshin/internal/api"
 	"github.com/shahab5191/memshin/internal/db"
 	"github.com/shahab5191/memshin/internal/llm"
 	"github.com/shahab5191/memshin/internal/memory"
@@ -66,15 +68,15 @@ func main() {
 	engine := pipeline.NewEngine(memoryList, provider)
 	log.Println("engine initialized")
 
-	// Promotions are published on a buffered channel; without a running
-	// dispatcher the layers would silently fill it and start dropping events.
-	go engine.RunPromotions(ctx)
+	cfg := api.GetConfigFromEnv()
 
-	response, err := engine.Process(ctx, "user123", "do you know what is my name?", "you are an assitant")
+	server := api.NewServer(pool, engine, cfg)
+	log.Println("server initialized on", cfg.Addr)
 
-
-	if err != nil {
-		panic(err)
+	log.Println("starting server...")
+	// ListenAndServe only ever returns an error here, so it has to be checked:
+	// otherwise a failed bind is indistinguishable from a clean exit.
+	if err := http.ListenAndServe(cfg.Addr, server.Routes()); err != nil {
+		log.Fatalf("http server: %v", err)
 	}
-	log.Println("engine processed request:", response)
 }
