@@ -13,12 +13,29 @@ import (
 const (
 	ShortTermMemoryTag = "ShortTermMemory"
 	MidTermMemoryName  = "MidTermMemory"
+
+	// RecentMessageFloor is the tail that stays in short term no matter what:
+	// the last four exchanges, two messages each. Mid-term promoting a message
+	// removes it from the first half of the window, so without this floor the
+	// immediate thread would vanish from under the model the moment it was
+	// summarised elsewhere.
+	RecentMessageFloor = 8
+
+	// PromotionThreshold is how far the backlog is allowed to run past the
+	// floor before short term releases the excess. Eight messages of slack
+	// means mid-term is handed four exchanges at a time rather than one per
+	// turn, which is the difference between summarising a stretch of
+	// conversation and summarising a single reply.
+	//
+	// The margin over the floor is what a release hands away, so this must
+	// stay above RecentMessageFloor.
+	PromotionThreshold = 16
 )
 
 type conversationStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
-	RecentByUser(ctx context.Context, userID string, limit int) ([]repository.Message, error)
-	ClaimPromotable(ctx context.Context, userID string) ([]repository.Message, error)
+	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
+	ClaimPromotable(ctx context.Context, userID string, threshold, recentFloor int) (int64, error)
 }
 
 type ShortTermMemory struct {
@@ -34,7 +51,7 @@ func (stm *ShortTermMemory) Name() string {
 }
 
 func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *pipeline.ChatContext) error {
-	messages, err := stm.store.RecentByUser(ctx, chat.UserID, 0)
+	messages, err := stm.store.ShortTermWindow(ctx, chat.UserID, RecentMessageFloor)
 	if err != nil {
 		return fmt.Errorf("%s: load conversation: %w", stm.Name(), err)
 	}
@@ -56,67 +73,56 @@ func (stm *ShortTermMemory) ResponseProcess(
 	ctx context.Context,
 	chat *pipeline.ChatContext,
 	llmResponse string,
-	promCh chan<- pipeline.PromotionEvent,
+	pub pipeline.Publisher,
 ) error {
 	if err := stm.store.AppendTurn(ctx, chat.UserID, chat.OriginalPrompt, llmResponse); err != nil {
 		return fmt.Errorf("%s: append turn: %w", stm.Name(), err)
 	}
 
-	stm.publishPromotable(ctx, chat.UserID, promCh)
+	stm.publishPromotable(ctx, chat.UserID, pub)
 
 	return nil
 }
 
+// publishPromotable hands the claimed messages to mid-term by ringing a
+// doorbell: the event says only whose turn it is, and mid-term reads the rows
+// it has been given from the store. Failures here are logged, never returned —
+// the turn itself is already durable, and the claim stands in the database
+// whether or not the notification lands.
 func (stm *ShortTermMemory) publishPromotable(
 	ctx context.Context,
 	userID string,
-	promCh chan<- pipeline.PromotionEvent,
+	pub pipeline.Publisher,
 ) {
-	if promCh == nil {
-		return // no dispatcher wired; a send would block forever
+	if pub == nil {
+		return // no dispatcher wired
 	}
 
-	messages, err := stm.store.ClaimPromotable(ctx, userID)
+	released, err := stm.store.ClaimPromotable(ctx, userID, PromotionThreshold, RecentMessageFloor)
 	if err != nil {
 		slog.Error("claim promotable failed", "layer", stm.Name(), "user", userID, "error", err)
 		return
 	}
-	if len(messages) == 0 {
-		return
-	}
-
-	blocks := make([]pipeline.ContextBlock, 0, len(messages))
-	for _, m := range messages {
-		blocks = append(blocks, pipeline.ContextBlock{
-			Source:   stm.Name(),
-			Tag:      ShortTermMemoryTag,
-			Content:  string(m.Role) + ": " + m.Content,
-			Priority: 1,
-		})
+	if released == 0 {
+		return // backlog still under the threshold, or an earlier release is outstanding
 	}
 
 	event := pipeline.PromotionEvent{
 		UserID:      userID,
+		SourceLayer: stm.Name(),
 		TargetLayer: MidTermMemoryName,
-		Payload: pipeline.PromotionPayload{
-			SourceLayer: ShortTermMemoryTag,
-			Content:     blocks,
-		},
 	}
 
-	select {
-	case promCh <- event:
-	default:
-		slog.Warn("promotion queue full, dropping event",
-			"layer", stm.Name(), "user", userID, "messages", len(messages))
+	if err := pub.Publish(ctx, event); err != nil {
+		slog.Warn("promotion not published",
+			"layer", stm.Name(), "user", userID, "messages", released, "error", err)
 	}
 }
 
 func (stm *ShortTermMemory) HandlePromotion(
 	ctx context.Context,
-	userID string,
-	payload pipeline.PromotionPayload,
-	promCh chan<- pipeline.PromotionEvent,
+	event pipeline.PromotionEvent,
+	pub pipeline.Publisher,
 ) error {
 	return nil
 }

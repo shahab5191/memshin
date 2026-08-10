@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type AppendTurnParams struct {
@@ -21,38 +20,144 @@ type AppendTurnParams struct {
 	Content string
 }
 
-const claimPromotable = `-- name: ClaimPromotable :many
-UPDATE conversation
-SET publish_status = 'published',
-    published_at   = now()
-WHERE user_id = $1
-  AND publish_status = 'pending'
-RETURNING seq, id, user_id, turn_id, role, content, created_at
+const claimPromotable = `-- name: ClaimPromotable :one
+WITH backlog AS (
+    SELECT b.seq
+    FROM conversation b
+    WHERE b.user_id = $1
+      AND b.publish_status = 'pending'
+),
+batch AS (
+    SELECT seq
+    FROM backlog
+    -- All-or-nothing gate: under the threshold, or with a release still
+    -- outstanding, this yields no rows and the update below is a no-op.
+    WHERE (SELECT count(*) FROM backlog) >= $2::bigint
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation p
+          WHERE p.user_id = $1
+            AND p.publish_status = 'published'
+      )
+    ORDER BY seq ASC
+    -- The newest @recent_floor messages stay pending, so the live thread is
+    -- never handed away mid-conversation.
+    --
+    -- greatest() is not decoration. Postgres evaluates LIMIT even when the
+    -- gate above has already excluded every row, so a backlog shorter than the
+    -- floor — every conversation's first turn — would otherwise abort the
+    -- statement with "LIMIT must not be negative".
+    LIMIT greatest((SELECT count(*) FROM backlog) - $3::bigint, 0)
+),
+claimed AS (
+    UPDATE conversation c
+    SET publish_status  = 'published',
+        published_at    = now(),
+        -- One version for the whole release, not per row. A batch can mix rows
+        -- that were reclaimed from an earlier release with rows that have never
+        -- left, and those carry different counters; taking the user's high-water
+        -- mark gives the batch a single value to be acknowledged under.
+        publish_version = (
+            SELECT coalesce(max(v.publish_version), 0) + 1
+            FROM conversation v
+            WHERE v.user_id = $1
+        )
+    WHERE c.seq IN (SELECT batch.seq FROM batch)
+      -- Re-evaluated under the row lock: if a concurrent turn for this user
+      -- claimed the same batch first, the row is no longer pending and is
+      -- skipped instead of being published twice.
+      AND c.publish_status = 'pending'
+    RETURNING c.seq
+)
+SELECT count(*)::bigint AS released FROM claimed
 `
 
-type ClaimPromotableRow struct {
-	Seq       int64
-	ID        uuid.UUID
-	UserID    string
-	TurnID    uuid.UUID
-	Role      string
-	Content   string
-	CreatedAt time.Time
+type ClaimPromotableParams struct {
+	UserID      string
+	Threshold   int64
+	RecentFloor int64
 }
 
-// ClaimPromotable selects and marks in one statement. The
-// publish_status = 'pending' predicate makes it a compare-and-swap, so only
-// rows this caller actually transitioned are returned and no message is handed
-// out twice.
-func (q *Queries) ClaimPromotable(ctx context.Context, userID string) ([]ClaimPromotableRow, error) {
-	rows, err := q.db.Query(ctx, claimPromotable, userID)
+// ClaimPromotable releases the backlog above the recent floor to mid-term. It
+// is a dam, not a tap: two conditions must hold before anything is let go.
+//
+// The backlog must have grown past @threshold, so mid-term receives whole
+// stretches of conversation instead of one exchange per turn. And nothing this
+// user published earlier may still be unacknowledged, because a release that
+// never lands must not be followed by a later one — mid-term can recover from
+// being behind, but not from a hole in the middle of its history.
+//
+// Everything above the floor goes at once, uncapped. How much fits in one
+// summarisation is mid-term's business, and it acknowledges in whatever
+// chunks suit it.
+func (q *Queries) ClaimPromotable(ctx context.Context, arg ClaimPromotableParams) (int64, error) {
+	row := q.db.QueryRow(ctx, claimPromotable, arg.UserID, arg.Threshold, arg.RecentFloor)
+	var released int64
+	err := row.Scan(&released)
+	return released, err
+}
+
+const markPromoted = `-- name: MarkPromoted :execrows
+UPDATE conversation
+SET publish_status = 'promoted'
+WHERE user_id = $1
+  AND turn_id = ANY($2::uuid[])
+  AND publish_status = 'published'
+  AND publish_version = $3::int
+`
+
+type MarkPromotedParams struct {
+	UserID         string
+	TurnIds        []uuid.UUID
+	PublishVersion int32
+}
+
+// MarkPromoted acknowledges the turns mid-term has durably stored, dropping
+// them out of the short-term window.
+//
+// The version fences the write. A worker whose lease expired mid-summary has
+// had its batch reclaimed and republished under a higher version, so its late
+// acknowledgement matches no rows rather than promoting messages that another
+// worker now owns. Zero rows affected means exactly that, and is not an error.
+func (q *Queries) MarkPromoted(ctx context.Context, arg MarkPromotedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markPromoted, arg.UserID, arg.TurnIds, arg.PublishVersion)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const publishedBatch = `-- name: PublishedBatch :many
+SELECT seq, id, user_id, turn_id, role, content, created_at, publish_version
+FROM conversation
+WHERE user_id = $1
+  AND publish_status = 'published'
+ORDER BY seq ASC
+`
+
+type PublishedBatchRow struct {
+	Seq            int64
+	ID             uuid.UUID
+	UserID         string
+	TurnID         uuid.UUID
+	Role           string
+	Content        string
+	CreatedAt      time.Time
+	PublishVersion int32
+}
+
+// PublishedBatch is what mid-term reads when the doorbell rings: everything
+// released to it and not yet acknowledged. publish_version travels with the
+// rows because acknowledging requires it.
+func (q *Queries) PublishedBatch(ctx context.Context, userID string) ([]PublishedBatchRow, error) {
+	rows, err := q.db.Query(ctx, publishedBatch, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ClaimPromotableRow
+	var items []PublishedBatchRow
 	for rows.Next() {
-		var i ClaimPromotableRow
+		var i PublishedBatchRow
 		if err := rows.Scan(
 			&i.Seq,
 			&i.ID,
@@ -61,6 +166,7 @@ func (q *Queries) ClaimPromotable(ctx context.Context, userID string) ([]ClaimPr
 			&i.Role,
 			&i.Content,
 			&i.CreatedAt,
+			&i.PublishVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -72,25 +178,38 @@ func (q *Queries) ClaimPromotable(ctx context.Context, userID string) ([]ClaimPr
 	return items, nil
 }
 
-const recentByUser = `-- name: RecentByUser :many
-SELECT seq, id, user_id, turn_id, role, content, created_at
-FROM (
-    SELECT seq, id, user_id, turn_id, role, content, created_at
-    FROM conversation
-    WHERE user_id = $1
-        AND publish_status <> 'promoted'
-    ORDER BY seq DESC
+const shortTermWindow = `-- name: ShortTermWindow :many
+WITH tail AS (
+    SELECT t.turn_id
+    FROM conversation t
+    WHERE t.user_id = $1
+    ORDER BY t.seq DESC
     LIMIT $2
-) recent
-ORDER BY seq ASC
+),
+cutoff AS (
+    SELECT min(w.seq) AS seq
+    FROM conversation w
+    WHERE w.user_id = $1
+      AND w.turn_id IN (SELECT tail.turn_id FROM tail)
+)
+SELECT c.seq, c.id, c.user_id, c.turn_id, c.role, c.content, c.created_at
+FROM conversation c
+WHERE c.user_id = $1
+  AND (
+        c.publish_status <> 'promoted'
+        -- NULL when the user has no history at all; the comparison then yields
+        -- NULL and this half simply contributes nothing.
+     OR c.seq >= (SELECT cutoff.seq FROM cutoff)
+  )
+ORDER BY c.seq ASC
 `
 
-type RecentByUserParams struct {
-	UserID     string
-	LimitCount pgtype.Int4
+type ShortTermWindowParams struct {
+	UserID      string
+	RecentCount int32
 }
 
-type RecentByUserRow struct {
+type ShortTermWindowRow struct {
 	Seq       int64
 	ID        uuid.UUID
 	UserID    string
@@ -100,18 +219,16 @@ type RecentByUserRow struct {
 	CreatedAt time.Time
 }
 
-// RecentByUser returns the newest @limit_count messages in chronological
-// order. The inner query walks conversation_user_recent_idx backwards; the
-// outer one flips the window so callers get it oldest-first for the prompt.
-func (q *Queries) RecentByUser(ctx context.Context, arg RecentByUserParams) ([]RecentByUserRow, error) {
-	rows, err := q.db.Query(ctx, recentByUser, arg.UserID, arg.LimitCount)
+// Short term memory window (4 exchange and anything not persisted in mid-term memory)
+func (q *Queries) ShortTermWindow(ctx context.Context, arg ShortTermWindowParams) ([]ShortTermWindowRow, error) {
+	rows, err := q.db.Query(ctx, shortTermWindow, arg.UserID, arg.RecentCount)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []RecentByUserRow
+	var items []ShortTermWindowRow
 	for rows.Next() {
-		var i RecentByUserRow
+		var i ShortTermWindowRow
 		if err := rows.Scan(
 			&i.Seq,
 			&i.ID,

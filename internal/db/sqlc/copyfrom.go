@@ -41,10 +41,6 @@ func (r iteratorForAppendTurn) Err() error {
 	return nil
 }
 
-// AppendTurn writes every message of a turn as one COPY, which is a single
-// statement and therefore atomic on its own — no explicit transaction needed
-// regardless of how many messages the turn contains. created_at is omitted so
-// Postgres applies its DEFAULT now().
 func (q *Queries) AppendTurn(ctx context.Context, arg []AppendTurnParams) (int64, error) {
 	return q.db.CopyFrom(ctx, []string{"conversation"}, []string{"id", "user_id", "turn_id", "role", "content"}, &iteratorForAppendTurn{rows: arg})
 }
