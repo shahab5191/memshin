@@ -78,7 +78,7 @@ func NewServer(db *pgxpool.Pool, engine chatEngine, cfg Config) *Server {
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat", s.handleChat())
+	mux.Handle("POST /v1/chat", authMiddleware(s.handleChat()))
 	mux.HandleFunc("GET /healthz", s.handleHealth())
 
 	return logRequests(mux)
