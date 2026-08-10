@@ -9,6 +9,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/shahab5191/memshin/internal/db"
+	"github.com/shahab5191/memshin/internal/llm"
+	"github.com/shahab5191/memshin/internal/memory"
+	"github.com/shahab5191/memshin/internal/pipeline"
+	"github.com/shahab5191/memshin/internal/repository"
 )
 
 func buildDSN() string {
@@ -45,4 +49,32 @@ func main() {
 	defer pool.Close()
 
 	log.Println("connected to database")
+
+	llmCfg, err := llm.GeminiConfigFromEnv()
+	if err != nil {
+		panic(err)
+	}
+	provider, err := llm.NewGemini(ctx, llmCfg)
+	if err != nil {
+		panic(err)
+	}
+	log.Println("llm provider initialized:", provider.Name())
+
+	memoryList := make([]pipeline.MemoryLayer, 0)
+	memoryStore := repository.NewConversations(pool)
+	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
+	engine := pipeline.NewEngine(memoryList, provider)
+	log.Println("engine initialized")
+
+	// Promotions are published on a buffered channel; without a running
+	// dispatcher the layers would silently fill it and start dropping events.
+	go engine.RunPromotions(ctx)
+
+	response, err := engine.Process(ctx, "user123", "do you know what is my name?", "you are an assitant")
+
+
+	if err != nil {
+		panic(err)
+	}
+	log.Println("engine processed request:", response)
 }

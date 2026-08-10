@@ -11,13 +11,8 @@ import (
 )
 
 const (
-	ShortTermMemoryTag = "short-term"
-
-	// MidTermMemoryName is the routing key for published promotions. The
-	// dispatcher matches it against MemoryLayer.Name(), so until a layer
-	// answering to this name is registered, every event logs an
-	// unknown-layer warning — visible by design rather than silently dropped.
-	MidTermMemoryName = "MidTermMemory"
+	ShortTermMemoryTag = "ShortTermMemory"
+	MidTermMemoryName  = "MidTermMemory"
 )
 
 type conversationStore interface {
