@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 
@@ -68,6 +67,10 @@ func main() {
 	engine := pipeline.NewEngine(memoryList, provider)
 	log.Println("engine initialized")
 
+	// Promotions are published on a buffered channel; without a running
+	// dispatcher the layers fill it and then start dropping claimed events.
+	go engine.RunPromotions(ctx)
+
 	cfg := api.GetConfigFromEnv()
 
 	server := api.NewServer(pool, engine, cfg)
@@ -76,7 +79,7 @@ func main() {
 	log.Println("starting server...")
 	// ListenAndServe only ever returns an error here, so it has to be checked:
 	// otherwise a failed bind is indistinguishable from a clean exit.
-	if err := http.ListenAndServe(cfg.Addr, server.Routes()); err != nil {
+	if err := server.HTTPServer().ListenAndServe(); err != nil {
 		log.Fatalf("http server: %v", err)
 	}
 }

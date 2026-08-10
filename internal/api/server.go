@@ -84,9 +84,30 @@ func (s *Server) Routes() http.Handler {
 	return logRequests(mux)
 }
 
+// HTTPServer builds the listener with timeouts applied. WriteTimeout has to
+// clear RequestTimeout, otherwise the connection dies before a slow generation
+// can be written back.
+func (s *Server) HTTPServer() *http.Server {
+	return &http.Server{
+		Addr:              s.cfg.Addr,
+		Handler:           s.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      s.cfg.RequestTimeout + 15*time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+}
+
+// WriteHeader captures the status on its way through. Without this the
+// embedded ResponseWriter takes the call directly and every request logs 200.
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 func logRequests(next http.Handler) http.Handler {
