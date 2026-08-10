@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type AppendTurnParams struct {
@@ -26,6 +27,7 @@ FROM (
     SELECT seq, id, user_id, turn_id, role, content, created_at
     FROM conversation
     WHERE user_id = $1
+        AND publish_status <> 'promoted'
     ORDER BY seq DESC
     LIMIT $2
 ) recent
@@ -34,7 +36,7 @@ ORDER BY seq ASC
 
 type RecentByUserParams struct {
 	UserID     string
-	LimitCount int32
+	LimitCount pgtype.Int4
 }
 
 type RecentByUserRow struct {

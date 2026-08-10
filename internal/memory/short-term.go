@@ -1,81 +1,48 @@
 package memory
 
 import (
-	"sync"
+	"context"
+	"fmt"
+	"strings"
 
 	"github.com/shahab5191/memshin/internal/pipeline"
+	"github.com/shahab5191/memshin/internal/repository"
 )
 
 const (
 	ShortTermMemoryTag = "short-term"
 )
 
-type Conversation struct {
-	Role      string
-	Content   string
-	Timestamp int64
-}
-
-type UserSession struct {
-	mu             sync.Mutex
-	RecentMessages []Conversation // Max 8 recent messages (4 before-and-forth pairs)
-	// It can outgrow the limit until previous messages are promoted to mid-term
-	Summeries []string // Max 4 summaries
-}
-
-func (us *UserSession) JoinRecentMessages() string {
-	us.mu.Lock()
-	defer us.mu.Unlock()
-
-	joined := ""
-	for _, conv := range us.RecentMessages {
-		joined += conv.Role + ": " + conv.Content + "\n"
-	}
-	return joined
+type conversationStore interface {
+	AppendTurn(ctx context.Context, userID, prompt, response string) error
+	RecentByUser(ctx context.Context, userID string, limit int) ([]repository.Message, error)
 }
 
 type ShortTermMemory struct {
-	sessions map[string]*UserSession
-	mu       sync.Mutex
+	store conversationStore
 }
 
-func NewShortTermMemory() *ShortTermMemory {
-	return &ShortTermMemory{
-		sessions: make(map[string]*UserSession),
-	}
+func NewShortTermMemory(store conversationStore) *ShortTermMemory {
+	return &ShortTermMemory{store: store}
 }
 
 func (stm *ShortTermMemory) Name() string {
 	return "ShortTermMemory"
 }
 
-func (stm *ShortTermMemory) RequestProcess(ctx *pipeline.ChatContext) error {
-	stm.mu.Lock()
-	defer stm.mu.Unlock()
-
-	session, exists := stm.sessions[ctx.UserID]
-	if !exists {
-		session = &UserSession{
-			RecentMessages: make([]Conversation, 0, 8),
-			Summeries:      make([]string, 0, 4),
-		}
-		stm.sessions[ctx.UserID] = session
+func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *pipeline.ChatContext) error {
+	messages, err := stm.store.RecentByUser(ctx, chat.UserID, 0)
+	if err != nil {
+		return fmt.Errorf("%s: load conversation: %w", stm.Name(), err)
+	}
+	if len(messages) == 0 {
+		return nil // first turn — nothing to inject
 	}
 
-	session.mu.Lock()
-	session.RecentMessages = append(session.RecentMessages, Conversation{
-		Role:    "user",
-		Content: ctx.OriginalPrompt,
-	})
-	session.mu.Unlock()
-
-	// In request processing, we do not check for the limit of recent messages. We only check in response processing.
-	// Add recent messages to the context
-	joinedMessages := session.JoinRecentMessages()
-	ctx.AddBlock(pipeline.ContextBlock{
+	chat.AddBlock(pipeline.ContextBlock{
 		Source:   stm.Name(),
 		Tag:      ShortTermMemoryTag,
-		Content:  joinedMessages,
+		Content:  renderMessages(messages),
 		Priority: 1,
 	})
 
@@ -83,72 +50,37 @@ func (stm *ShortTermMemory) RequestProcess(ctx *pipeline.ChatContext) error {
 }
 
 func (stm *ShortTermMemory) ResponseProcess(
-	ctx *pipeline.ChatContext,
+	ctx context.Context,
+	chat *pipeline.ChatContext,
 	llmResponse string,
 	promCh chan<- pipeline.PromotionEvent,
 ) error {
-	stm.mu.Lock()
-	defer stm.mu.Unlock()
-
-	session, exists := stm.sessions[ctx.UserID]
-	if !exists {
-		return nil // No session found, nothing to process
+	if err := stm.store.AppendTurn(ctx, chat.UserID, chat.OriginalPrompt, llmResponse); err != nil {
+		return fmt.Errorf("%s: append turn: %w", stm.Name(), err)
 	}
 
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	// Add the LLM response to recent messages
-	session.RecentMessages = append(session.RecentMessages, Conversation{
-		Role:    "assistant",
-		Content: llmResponse,
-	})
-
-	// Check if we need to promote messages to mid-term memory
-	go stm.PublishExtraMemory(promCh, session, ctx.UserID)
+	// Promotion is not published yet. It needs the ClaimPromotable /
+	// AckPromoted queries
 
 	return nil
 }
 
 func (stm *ShortTermMemory) HandlePromotion(
-	userId string,
-	payload string,
+	ctx context.Context,
+	userID string,
+	payload pipeline.PromotionPayload,
 	promCh chan<- pipeline.PromotionEvent,
 ) error {
-	// For short-term memory, we don't handle promotions from other layers.
-	// This method is a no-op for this layer.
 	return nil
 }
 
-func (stm *ShortTermMemory) PublishExtraMemory(promCh chan<- pipeline.PromotionEvent, session *UserSession, userId string) {
-	stm.mu.Lock()
-	defer stm.mu.Unlock()
-
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	// Check if we need to promote messages to mid-term memory
-	if len(session.RecentMessages) > 8 {
-		// Promote the oldest messages to mid-term memory
-		// For now do nothing, just send a promotion event
-
-		content := make([]pipeline.ContextBlock, 0, len(session.RecentMessages)-8)
-		for i := 0; i < len(session.RecentMessages)-8; i++ {
-			content = append(content, pipeline.ContextBlock{
-				Source:   stm.Name(),
-				Tag:      ShortTermMemoryTag,
-				Content:  session.RecentMessages[i].Role + ": " + session.RecentMessages[i].Content,
-				Priority: 1,
-			})
-		}
-
-		// we keep the message until ack from mid-term memory, so we don't remove them from recent messages yet
-
-		promCh <- pipeline.PromotionEvent{
-			UserID: userId,
-			Payload: pipeline.PromotionPayload{
-				SourceLayer: ShortTermMemoryTag,
-				Content:     content,
-			},
-		}
+func renderMessages(messages []repository.Message) string {
+	var b strings.Builder
+	for _, m := range messages {
+		b.WriteString(string(m.Role))
+		b.WriteString(": ")
+		b.WriteString(m.Content)
+		b.WriteByte('\n')
 	}
+	return strings.TrimRight(b.String(), "\n")
 }

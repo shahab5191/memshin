@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shahab5191/memshin/internal/db/sqlc"
@@ -82,14 +83,13 @@ func (c *Conversations) RecentByUser(ctx context.Context, userID string, limit i
 	if userID == "" {
 		return nil, fmt.Errorf("recent by user: empty user id")
 	}
-	if limit <= 0 {
-		return nil, fmt.Errorf("recent by user: limit must be positive, got %d", limit)
+	// 0 limit means no limit
+	arg := sqlc.RecentByUserParams{UserID: userID}
+	if limit > 0 {
+		arg.LimitCount = pgtype.Int4{Int32: int32(limit), Valid: true}
 	}
 
-	rows, err := c.q.RecentByUser(ctx, sqlc.RecentByUserParams{
-		UserID:     userID,
-		LimitCount: int32(limit),
-	})
+	rows, err := c.q.RecentByUser(ctx, arg)
 	if err != nil {
 		return nil, fmt.Errorf("recent by user: %w", err)
 	}

@@ -15,7 +15,8 @@ FROM (
     SELECT seq, id, user_id, turn_id, role, content, created_at
     FROM conversation
     WHERE user_id = @user_id
+        AND publish_status <> 'promoted'
     ORDER BY seq DESC
-    LIMIT @limit_count
+    LIMIT sqlc.narg('limit_count')
 ) recent
 ORDER BY seq ASC;
