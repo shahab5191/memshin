@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/shahab5191/memshin/internal/pipeline"
@@ -11,11 +12,18 @@ import (
 
 const (
 	ShortTermMemoryTag = "short-term"
+
+	// MidTermMemoryName is the routing key for published promotions. The
+	// dispatcher matches it against MemoryLayer.Name(), so until a layer
+	// answering to this name is registered, every event logs an
+	// unknown-layer warning — visible by design rather than silently dropped.
+	MidTermMemoryName = "MidTermMemory"
 )
 
 type conversationStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
 	RecentByUser(ctx context.Context, userID string, limit int) ([]repository.Message, error)
+	ClaimPromotable(ctx context.Context, userID string) ([]repository.Message, error)
 }
 
 type ShortTermMemory struct {
@@ -59,10 +67,54 @@ func (stm *ShortTermMemory) ResponseProcess(
 		return fmt.Errorf("%s: append turn: %w", stm.Name(), err)
 	}
 
-	// Promotion is not published yet. It needs the ClaimPromotable /
-	// AckPromoted queries
+	stm.publishPromotable(ctx, chat.UserID, promCh)
 
 	return nil
+}
+
+func (stm *ShortTermMemory) publishPromotable(
+	ctx context.Context,
+	userID string,
+	promCh chan<- pipeline.PromotionEvent,
+) {
+	if promCh == nil {
+		return // no dispatcher wired; a send would block forever
+	}
+
+	messages, err := stm.store.ClaimPromotable(ctx, userID)
+	if err != nil {
+		slog.Error("claim promotable failed", "layer", stm.Name(), "user", userID, "error", err)
+		return
+	}
+	if len(messages) == 0 {
+		return
+	}
+
+	blocks := make([]pipeline.ContextBlock, 0, len(messages))
+	for _, m := range messages {
+		blocks = append(blocks, pipeline.ContextBlock{
+			Source:   stm.Name(),
+			Tag:      ShortTermMemoryTag,
+			Content:  string(m.Role) + ": " + m.Content,
+			Priority: 1,
+		})
+	}
+
+	event := pipeline.PromotionEvent{
+		UserID:      userID,
+		TargetLayer: MidTermMemoryName,
+		Payload: pipeline.PromotionPayload{
+			SourceLayer: ShortTermMemoryTag,
+			Content:     blocks,
+		},
+	}
+
+	select {
+	case promCh <- event:
+	default:
+		slog.Warn("promotion queue full, dropping event",
+			"layer", stm.Name(), "user", userID, "messages", len(messages))
+	}
 }
 
 func (stm *ShortTermMemory) HandlePromotion(

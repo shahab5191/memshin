@@ -5,6 +5,8 @@ import (
 	"log/slog"
 )
 
+const promotionBuffer = 256
+
 type MemoryLayer interface {
 	Name() string
 	RequestProcess(ctx context.Context, chat *ChatContext) error
@@ -20,18 +22,45 @@ type LLMProvider interface {
 type Engine struct {
 	memory []MemoryLayer
 	llm    LLMProvider
-	promCh chan<- PromotionEvent
+	promCh chan PromotionEvent
 }
 
-// NewEngine wires the layers together. promCh may be nil only while no layer
-// publishes promotions — a send on a nil channel blocks forever, so a layer
-// that publishes with no consumer attached leaks a goroutine permanently.
-func NewEngine(memory []MemoryLayer, llm LLMProvider, promCh chan<- PromotionEvent) *Engine {
+func NewEngine(memory []MemoryLayer, llm LLMProvider) *Engine {
 	return &Engine{
 		memory: memory,
 		llm:    llm,
-		promCh: promCh,
+		promCh: make(chan PromotionEvent, promotionBuffer),
 	}
+}
+
+func (e *Engine) RunPromotions(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-e.promCh:
+			if !ok {
+				return
+			}
+			e.dispatch(ctx, event)
+		}
+	}
+}
+
+func (e *Engine) dispatch(ctx context.Context, event PromotionEvent) {
+	for _, layer := range e.memory {
+		if layer.Name() != event.TargetLayer {
+			continue
+		}
+		if err := layer.HandlePromotion(ctx, event.UserID, event.Payload, e.promCh); err != nil {
+			slog.Error("promotion handler failed",
+				"layer", layer.Name(), "user", event.UserID, "error", err)
+		}
+		return
+	}
+
+	slog.Warn("promotion event addressed to unknown layer",
+		"target", event.TargetLayer, "source", event.Payload.SourceLayer, "user", event.UserID)
 }
 
 func (e *Engine) Process(ctx context.Context, userID, prompt, sysMsg string) (string, error) {

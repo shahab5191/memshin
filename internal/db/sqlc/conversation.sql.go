@@ -21,6 +21,57 @@ type AppendTurnParams struct {
 	Content string
 }
 
+const claimPromotable = `-- name: ClaimPromotable :many
+UPDATE conversation
+SET publish_status = 'published',
+    published_at   = now()
+WHERE user_id = $1
+  AND publish_status = 'pending'
+RETURNING seq, id, user_id, turn_id, role, content, created_at
+`
+
+type ClaimPromotableRow struct {
+	Seq       int64
+	ID        uuid.UUID
+	UserID    string
+	TurnID    uuid.UUID
+	Role      string
+	Content   string
+	CreatedAt time.Time
+}
+
+// ClaimPromotable selects and marks in one statement. The
+// publish_status = 'pending' predicate makes it a compare-and-swap, so only
+// rows this caller actually transitioned are returned and no message is handed
+// out twice.
+func (q *Queries) ClaimPromotable(ctx context.Context, userID string) ([]ClaimPromotableRow, error) {
+	rows, err := q.db.Query(ctx, claimPromotable, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimPromotableRow
+	for rows.Next() {
+		var i ClaimPromotableRow
+		if err := rows.Scan(
+			&i.Seq,
+			&i.ID,
+			&i.UserID,
+			&i.TurnID,
+			&i.Role,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const recentByUser = `-- name: RecentByUser :many
 SELECT seq, id, user_id, turn_id, role, content, created_at
 FROM (

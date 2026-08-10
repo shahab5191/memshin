@@ -102,6 +102,32 @@ func (c *Conversations) RecentByUser(ctx context.Context, userID string, limit i
 	return messages, nil
 }
 
+func (c *Conversations) ClaimPromotable(ctx context.Context, userID string) ([]Message, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("claim promotable: empty user id")
+	}
+
+	rows, err := c.q.ClaimPromotable(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("claim promotable: %w", err)
+	}
+
+	messages := make([]Message, 0, len(rows))
+	for _, r := range rows {
+		messages = append(messages, Message{
+			ID:        r.ID,
+			TurnID:    r.TurnID,
+			UserID:    r.UserID,
+			Role:      Role(r.Role),
+			Content:   r.Content,
+			Seq:       r.Seq,
+			CreatedAt: r.CreatedAt,
+		})
+	}
+
+	return messages, nil
+}
+
 func toMessage(r sqlc.RecentByUserRow) Message {
 	return Message{
 		ID:        r.ID,

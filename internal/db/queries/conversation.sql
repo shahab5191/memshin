@@ -6,6 +6,18 @@
 INSERT INTO conversation (id, user_id, turn_id, role, content)
 VALUES ($1, $2, $3, $4, $5);
 
+-- ClaimPromotable selects and marks in one statement. The
+-- publish_status = 'pending' predicate makes it a compare-and-swap, so only
+-- rows this caller actually transitioned are returned and no message is handed
+-- out twice.
+-- name: ClaimPromotable :many
+UPDATE conversation
+SET publish_status = 'published',
+    published_at   = now()
+WHERE user_id = @user_id
+  AND publish_status = 'pending'
+RETURNING seq, id, user_id, turn_id, role, content, created_at;
+
 -- RecentByUser returns the newest @limit_count messages in chronological
 -- order. The inner query walks conversation_user_recent_idx backwards; the
 -- outer one flips the window so callers get it oldest-first for the prompt.
