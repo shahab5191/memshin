@@ -10,34 +10,6 @@ import (
 	"github.com/shahab5191/memshin/internal/repository"
 )
 
-const (
-	ShortTermMemoryTag = "ShortTermMemory"
-	MidTermMemoryName  = "MidTermMemory"
-
-	// RecentMessageFloor is the tail that stays in short term no matter what:
-	// the last four exchanges, two messages each. Mid-term promoting a message
-	// removes it from the first half of the window, so without this floor the
-	// immediate thread would vanish from under the model the moment it was
-	// summarised elsewhere.
-	RecentMessageFloor = 8
-
-	// PromotionThreshold is how far the backlog is allowed to run past the
-	// floor before short term releases the excess. Eight messages of slack
-	// means mid-term is handed four exchanges at a time rather than one per
-	// turn, which is the difference between summarising a stretch of
-	// conversation and summarising a single reply.
-	//
-	// The margin over the floor is what a release hands away, so this must
-	// stay above RecentMessageFloor.
-	PromotionThreshold = 16
-)
-
-type conversationStore interface {
-	AppendTurn(ctx context.Context, userID, prompt, response string) error
-	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
-	ClaimPromotable(ctx context.Context, userID string, threshold, recentFloor int) (int64, error)
-}
-
 type ShortTermMemory struct {
 	store conversationStore
 }
@@ -84,11 +56,6 @@ func (stm *ShortTermMemory) ResponseProcess(
 	return nil
 }
 
-// publishPromotable hands the claimed messages to mid-term by ringing a
-// doorbell: the event says only whose turn it is, and mid-term reads the rows
-// it has been given from the store. Failures here are logged, never returned —
-// the turn itself is already durable, and the claim stands in the database
-// whether or not the notification lands.
 func (stm *ShortTermMemory) publishPromotable(
 	ctx context.Context,
 	userID string,

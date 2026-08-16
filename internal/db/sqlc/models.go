@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pgvector/pgvector-go"
 )
 
 type Conversation struct {
@@ -22,4 +23,18 @@ type Conversation struct {
 	PublishStatus  string
 	PublishedAt    pgtype.Timestamptz
 	PublishVersion int32
+}
+
+type MidTermFact struct {
+	ID             uuid.UUID
+	UserID         string
+	Content        string
+	Embedding      pgvector.Vector
+	SourceTurnIds  []uuid.UUID
+	PublishVersion int32
+	FactIndex      int32
+	ValidFrom      pgtype.Timestamptz
+	CreatedAt      time.Time
+	SupersededAt   pgtype.Timestamptz
+	ContentTsv     interface{}
 }

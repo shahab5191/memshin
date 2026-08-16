@@ -26,8 +26,16 @@ type Publisher interface {
 	Publish(ctx context.Context, event PromotionEvent) error
 }
 
+type Consumer interface {
+	Consume(ctx context.Context) (<-chan PromotionEvent, error)
+}
+
 type channelPublisher struct {
 	ch chan<- PromotionEvent
+}
+
+type channelConsumer struct {
+	ch <-chan PromotionEvent
 }
 
 // NewChannelPublisher publishes into the in-process dispatcher loop.
@@ -35,13 +43,10 @@ func NewChannelPublisher(ch chan<- PromotionEvent) Publisher {
 	return &channelPublisher{ch: ch}
 }
 
-// Publish never blocks. Layers call this inline on the request path, where a
-// blocking send would stall the user's response, and a promotion handler may
-// itself publish onward while it is the only thing draining the channel — a
-// blocking send there would deadlock the dispatcher against itself.
-//
-// The context is unused: a non-blocking send has nothing to cancel. Transports
-// that do I/O will need it.
+func NewChannelConsumer(ch <-chan PromotionEvent) *channelConsumer {
+	return &channelConsumer{ch: ch}
+}
+
 func (p *channelPublisher) Publish(_ context.Context, event PromotionEvent) error {
 	select {
 	case p.ch <- event:
@@ -49,4 +54,8 @@ func (p *channelPublisher) Publish(_ context.Context, event PromotionEvent) erro
 	default:
 		return ErrPromotionQueueFull
 	}
+}
+
+func (c *channelConsumer) Consume(_ context.Context) (<-chan PromotionEvent, error) {
+	return c.ch, nil
 }

@@ -61,9 +61,37 @@ func main() {
 	}
 	log.Println("llm provider initialized:", provider.Name())
 
-	memoryList := make([]pipeline.MemoryLayer, 0)
+	embedCfg, err := llm.EmbedderConfigFromEnv()
+	if err != nil {
+		panic(err)
+	}
+	embedder, err := llm.NewGeminiEmbedder(ctx, embedCfg)
+	if err != nil {
+		panic(err)
+	}
+
+	analystCfg, err := llm.AnalystConfigFromEnv()
+	if err != nil {
+		panic(err)
+	}
+	analyst, err := llm.NewAnalyst(ctx, analystCfg)
+	if err != nil {
+		panic(err)
+	}
+	log.Println("mid-term analyst initialized:", analyst.Name())
+
 	memoryStore := repository.NewConversations(pool)
-	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
+	factStore := repository.NewFacts(pool)
+
+	// Order matters for layers that read pipeline state another layer writes:
+	// focus memory, once it exists, has to sit ahead of mid-term, which hands
+	// ChatContext.Focus to the decomposer to resolve references before probing.
+	// Rendering order into the prompt is independent of this and comes from
+	// each block's Priority.
+	memoryList := []pipeline.MemoryLayer{
+		memory.NewShortTermMemory(memoryStore),
+		memory.NewMidTermMemory(memoryStore, factStore, analyst, embedder),
+	}
 	engine := pipeline.NewEngine(memoryList, provider)
 	log.Println("engine initialized")
 

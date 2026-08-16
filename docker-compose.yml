@@ -1,6 +1,10 @@
 services:
   db:
-    image: postgres:17
+    # Official postgres:17 plus the pgvector extension. Pinned to the trixie
+    # variant to match the glibc that postgres:17 used, so the existing pgdata
+    # volume's text collations stay valid — the default (bookworm) tag has an
+    # older glibc and triggers a collation version mismatch.
+    image: pgvector/pgvector:pg17-trixie
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-memshin}

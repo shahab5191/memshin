@@ -11,6 +11,21 @@ type ChatContext struct {
 	OriginalPrompt string
 	SystemMessage  string
 	Blocks         []ContextBlock
+
+	// Focus is what the conversation is currently about: the topics a reference
+	// like "that" or "the other one" could be pointing at. The focus layer
+	// writes it; layers after it read it.
+	//
+	// It travels as a field rather than as a Block because downstream layers
+	// consume it programmatically — mid-term hands it to the decomposer to
+	// resolve references before probing — and a rendered string would have to
+	// be parsed back apart. The focus layer separately adds its own tagged
+	// Block for the model to read.
+	//
+	// This makes layer order load-bearing for the layers that read it, which
+	// nothing else in the pipeline requires. See the ordering note where the
+	// engine's layers are assembled.
+	Focus []string
 }
 
 type ContextBlock struct {
