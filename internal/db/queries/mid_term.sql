@@ -28,9 +28,14 @@ WHERE user_id = @user_id AND publish_version = @publish_version::int;
 WITH probes AS (
     -- Two single-argument unnests joined on ordinality rather than one
     -- two-argument call, which sqlc's catalog cannot resolve.
-    SELECT v.idx, v.vec, t.txt
-    FROM unnest(@vectors::vector[]) WITH ORDINALITY AS v(vec, idx)
-    JOIN unnest(@texts::text[])     WITH ORDINALITY AS t(txt, idx) USING (idx)
+    --
+    -- Vectors arrive as text and are cast here rather than passed as vector[]:
+    -- pgx carries a scalar vector over pgvector's text codec, but has no codec
+    -- for the array type, and registering one costs a round trip on every new
+    -- pooled connection.
+    SELECT v.idx, v.vec::vector AS vec, t.txt
+    FROM unnest(@vectors::text[]) WITH ORDINALITY AS v(vec, idx)
+    JOIN unnest(@texts::text[])   WITH ORDINALITY AS t(txt, idx) USING (idx)
 ),
 dense AS (
     SELECT p.idx,

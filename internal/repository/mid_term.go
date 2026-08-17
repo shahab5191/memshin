@@ -155,6 +155,15 @@ func (f *Facts) StoreBatch(
 		return 0, fmt.Errorf("store batch: mark promoted: %w", err)
 	}
 
+	// Nothing settled means the version was fenced out: this batch was
+	// reclaimed and reissued while we were extracting, and another worker owns
+	// it now. Returning without committing discards our facts along with the
+	// acknowledgement — committing them would write facts for a release we lost
+	// and let the owner write them again.
+	if settled == 0 {
+		return 0, nil
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("store batch: commit: %w", err)
 	}
@@ -177,13 +186,14 @@ func (f *Facts) Search(ctx context.Context, userID string, p SearchParams) ([]Re
 			p.PerProbe, p.MaxResults)
 	}
 
-	vectors := make([]pgvector.Vector, 0, len(p.Probes))
+	// Serialised to pgvector's text form; the query casts each element back.
+	vectors := make([]string, 0, len(p.Probes))
 	texts := make([]string, 0, len(p.Probes))
 	for i, probe := range p.Probes {
 		if len(probe.Vector) == 0 {
 			return nil, fmt.Errorf("search facts: probe %d has no vector", i)
 		}
-		vectors = append(vectors, pgvector.NewVector(probe.Vector))
+		vectors = append(vectors, pgvector.NewVector(probe.Vector).String())
 		texts = append(texts, probe.Text)
 	}
 

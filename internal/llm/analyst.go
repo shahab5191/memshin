@@ -14,7 +14,10 @@ import (
 const (
 	// Flash Lite because both calls are structured extraction, not reasoning,
 	// and the decomposer sits on the request path ahead of the main generation.
-	defaultAnalystModel = "gemini-2.5-flash-lite"
+	// Pinned rather than the gemini-flash-lite-latest alias: these two prompts
+	// are tuned against one model's behaviour, and a silent version bump moves
+	// extraction granularity underneath them.
+	defaultAnalystModel = "gemini-3.5-flash-lite"
 
 	// Short by design. The read path falls back to probing with the raw prompt
 	// when this call does not land, so waiting on it past a second costs more
