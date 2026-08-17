@@ -20,6 +20,57 @@ type AppendTurnParams struct {
 	Content string
 }
 
+const claimIdleBacklog = `-- name: ClaimIdleBacklog :one
+WITH claimed AS (
+    UPDATE conversation c
+    SET publish_status  = 'published',
+        published_at    = now(),
+        publish_version = (
+            SELECT coalesce(max(v.publish_version), 0) + 1
+            FROM conversation v
+            WHERE v.user_id = $1
+        )
+    WHERE c.user_id = $1
+      AND c.publish_status = 'pending'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation p
+          WHERE p.user_id = $1
+            AND p.publish_status = 'published'
+      )
+      -- Re-checked under the row lock. A turn can arrive between the scan that
+      -- selected this user and this statement, and a session that just came
+      -- back to life must not have its live thread taken away.
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation r
+          WHERE r.user_id = $1
+            AND r.created_at > now() - make_interval(secs => $2::int)
+      )
+    RETURNING c.seq
+)
+SELECT count(*)::bigint AS released FROM claimed
+`
+
+type ClaimIdleBacklogParams struct {
+	UserID      string
+	IdleSeconds int32
+}
+
+// ClaimIdleBacklog releases a finished conversation's whole backlog, floor and
+// threshold both ignored.
+//
+// Neither gate applies once the session is over. The threshold exists so
+// mid-term receives whole stretches rather than single exchanges, and there will
+// be no further exchanges to wait for. The floor exists so the live thread is
+// never handed away mid-conversation, and there is no live thread.
+func (q *Queries) ClaimIdleBacklog(ctx context.Context, arg ClaimIdleBacklogParams) (int64, error) {
+	row := q.db.QueryRow(ctx, claimIdleBacklog, arg.UserID, arg.IdleSeconds)
+	var released int64
+	err := row.Scan(&released)
+	return released, err
+}
+
 const claimPromotable = `-- name: ClaimPromotable :one
 WITH backlog AS (
     SELECT b.seq
@@ -95,6 +146,44 @@ func (q *Queries) ClaimPromotable(ctx context.Context, arg ClaimPromotableParams
 	var released int64
 	err := row.Scan(&released)
 	return released, err
+}
+
+const idleUsersWithBacklog = `-- name: IdleUsersWithBacklog :many
+SELECT c.user_id
+FROM conversation c
+WHERE c.publish_status <> 'promoted'
+GROUP BY c.user_id
+HAVING bool_or(c.publish_status = 'pending')
+   AND NOT bool_or(c.publish_status = 'published')
+   AND max(c.created_at) < now() - make_interval(secs => $1::int)
+`
+
+// IdleUsersWithBacklog finds conversations that have gone quiet with messages
+// still waiting. Their backlog would otherwise sit below PromotionThreshold
+// forever and keep being injected verbatim into whatever the user says next
+// days later, because the short-term window returns everything not promoted.
+//
+// Users with an outstanding release are excluded: their backlog is already on
+// its way, and if it is stuck that is the reclaim sweep's business, not this
+// one's.
+func (q *Queries) IdleUsersWithBacklog(ctx context.Context, idleSeconds int32) ([]string, error) {
+	rows, err := q.db.Query(ctx, idleUsersWithBacklog, idleSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markPromoted = `-- name: MarkPromoted :execrows
@@ -178,6 +267,38 @@ func (q *Queries) PublishedBatch(ctx context.Context, userID string) ([]Publishe
 	return items, nil
 }
 
+const reclaimStalePublished = `-- name: ReclaimStalePublished :execrows
+UPDATE conversation
+SET publish_status = 'pending',
+    published_at   = NULL
+WHERE user_id = $1
+  AND publish_status = 'published'
+  AND published_at < now() - make_interval(secs => $2::int)
+`
+
+type ReclaimStalePublishedParams struct {
+	UserID       string
+	LeaseSeconds int32
+}
+
+// ReclaimStalePublished returns an abandoned release to the backlog.
+//
+// Without this the claim gate deadlocks a user permanently: nothing new is ever
+// released while an earlier release is outstanding, so one crashed ingest grows
+// that user's short-term window without bound for as long as the process lives.
+//
+// The rows go back to 'pending' rather than being re-published, so the next
+// release stamps them with a fresh version. That is what fences the worker that
+// vanished: its late acknowledgement matches no rows and cannot promote messages
+// another worker now owns.
+func (q *Queries) ReclaimStalePublished(ctx context.Context, arg ReclaimStalePublishedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reclaimStalePublished, arg.UserID, arg.LeaseSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const shortTermWindow = `-- name: ShortTermWindow :many
 WITH tail AS (
     SELECT t.turn_id
@@ -241,6 +362,33 @@ func (q *Queries) ShortTermWindow(ctx context.Context, arg ShortTermWindowParams
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const usersWithStalePublished = `-- name: UsersWithStalePublished :many
+SELECT DISTINCT c.user_id
+FROM conversation c
+WHERE c.publish_status = 'published'
+  AND c.published_at < now() - make_interval(secs => $1::int)
+`
+
+func (q *Queries) UsersWithStalePublished(ctx context.Context, leaseSeconds int32) ([]string, error) {
+	rows, err := q.db.Query(ctx, usersWithStalePublished, leaseSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

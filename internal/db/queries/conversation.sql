@@ -115,3 +115,82 @@ WHERE c.user_id = @user_id
      OR c.seq >= (SELECT cutoff.seq FROM cutoff)
   )
 ORDER BY c.seq ASC;
+
+-- IdleUsersWithBacklog finds conversations that have gone quiet with messages
+-- still waiting. Their backlog would otherwise sit below PromotionThreshold
+-- forever and keep being injected verbatim into whatever the user says next
+-- days later, because the short-term window returns everything not promoted.
+--
+-- Users with an outstanding release are excluded: their backlog is already on
+-- its way, and if it is stuck that is the reclaim sweep's business, not this
+-- one's.
+-- name: IdleUsersWithBacklog :many
+SELECT c.user_id
+FROM conversation c
+WHERE c.publish_status <> 'promoted'
+GROUP BY c.user_id
+HAVING bool_or(c.publish_status = 'pending')
+   AND NOT bool_or(c.publish_status = 'published')
+   AND max(c.created_at) < now() - make_interval(secs => @idle_seconds::int);
+
+-- ClaimIdleBacklog releases a finished conversation's whole backlog, floor and
+-- threshold both ignored.
+--
+-- Neither gate applies once the session is over. The threshold exists so
+-- mid-term receives whole stretches rather than single exchanges, and there will
+-- be no further exchanges to wait for. The floor exists so the live thread is
+-- never handed away mid-conversation, and there is no live thread.
+-- name: ClaimIdleBacklog :one
+WITH claimed AS (
+    UPDATE conversation c
+    SET publish_status  = 'published',
+        published_at    = now(),
+        publish_version = (
+            SELECT coalesce(max(v.publish_version), 0) + 1
+            FROM conversation v
+            WHERE v.user_id = @user_id
+        )
+    WHERE c.user_id = @user_id
+      AND c.publish_status = 'pending'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation p
+          WHERE p.user_id = @user_id
+            AND p.publish_status = 'published'
+      )
+      -- Re-checked under the row lock. A turn can arrive between the scan that
+      -- selected this user and this statement, and a session that just came
+      -- back to life must not have its live thread taken away.
+      AND NOT EXISTS (
+          SELECT 1
+          FROM conversation r
+          WHERE r.user_id = @user_id
+            AND r.created_at > now() - make_interval(secs => @idle_seconds::int)
+      )
+    RETURNING c.seq
+)
+SELECT count(*)::bigint AS released FROM claimed;
+
+-- name: UsersWithStalePublished :many
+SELECT DISTINCT c.user_id
+FROM conversation c
+WHERE c.publish_status = 'published'
+  AND c.published_at < now() - make_interval(secs => @lease_seconds::int);
+
+-- ReclaimStalePublished returns an abandoned release to the backlog.
+--
+-- Without this the claim gate deadlocks a user permanently: nothing new is ever
+-- released while an earlier release is outstanding, so one crashed ingest grows
+-- that user's short-term window without bound for as long as the process lives.
+--
+-- The rows go back to 'pending' rather than being re-published, so the next
+-- release stamps them with a fresh version. That is what fences the worker that
+-- vanished: its late acknowledgement matches no rows and cannot promote messages
+-- another worker now owns.
+-- name: ReclaimStalePublished :execrows
+UPDATE conversation
+SET publish_status = 'pending',
+    published_at   = NULL
+WHERE user_id = @user_id
+  AND publish_status = 'published'
+  AND published_at < now() - make_interval(secs => @lease_seconds::int);

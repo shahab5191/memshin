@@ -240,3 +240,72 @@ func toMessage(r sqlc.ShortTermWindowRow) Message {
 		CreatedAt: r.CreatedAt,
 	}
 }
+
+// IdleUsersWithBacklog lists users whose conversation has gone quiet with
+// messages still waiting to be promoted.
+func (c *Conversations) IdleUsersWithBacklog(
+	ctx context.Context,
+	idleGap time.Duration,
+) ([]string, error) {
+	users, err := c.q.IdleUsersWithBacklog(ctx, int32(idleGap.Seconds()))
+	if err != nil {
+		return nil, fmt.Errorf("idle users with backlog: %w", err)
+	}
+	return users, nil
+}
+
+// ClaimIdleBacklog releases everything a finished conversation left pending. It
+// returns zero when the session turned out to be live after all, which the
+// statement re-checks under the row lock.
+func (c *Conversations) ClaimIdleBacklog(
+	ctx context.Context,
+	userID string,
+	idleGap time.Duration,
+) (int64, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("claim idle backlog: empty user id")
+	}
+
+	released, err := c.q.ClaimIdleBacklog(ctx, sqlc.ClaimIdleBacklogParams{
+		UserID:      userID,
+		IdleSeconds: int32(idleGap.Seconds()),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("claim idle backlog: %w", err)
+	}
+	return released, nil
+}
+
+// UsersWithStalePublished lists users whose release has been outstanding longer
+// than the lease, meaning whoever claimed it never finished.
+func (c *Conversations) UsersWithStalePublished(
+	ctx context.Context,
+	lease time.Duration,
+) ([]string, error) {
+	users, err := c.q.UsersWithStalePublished(ctx, int32(lease.Seconds()))
+	if err != nil {
+		return nil, fmt.Errorf("users with stale published: %w", err)
+	}
+	return users, nil
+}
+
+// ReclaimStalePublished returns an abandoned release to the backlog so a later
+// claim can reissue it under a fresh version.
+func (c *Conversations) ReclaimStalePublished(
+	ctx context.Context,
+	userID string,
+	lease time.Duration,
+) (int64, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("reclaim stale published: empty user id")
+	}
+
+	n, err := c.q.ReclaimStalePublished(ctx, sqlc.ReclaimStalePublishedParams{
+		UserID:       userID,
+		LeaseSeconds: int32(lease.Seconds()),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stale published: %w", err)
+	}
+	return n, nil
+}

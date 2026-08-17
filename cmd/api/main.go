@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/shahab5191/memshin/internal/api"
@@ -82,13 +83,14 @@ func main() {
 
 	memoryStore := repository.NewConversations(pool)
 	factStore := repository.NewFacts(pool)
+	focusStore := repository.NewFocus(pool)
 
-	// Order matters for layers that read pipeline state another layer writes:
-	// focus memory, once it exists, has to sit ahead of mid-term, which hands
-	// ChatContext.Focus to the decomposer to resolve references before probing.
-	// Rendering order into the prompt is independent of this and comes from
-	// each block's Priority.
+	// Order matters here, unlike everywhere else in the pipeline: focus writes
+	// ChatContext.Focus and mid-term hands it to the decomposer to resolve
+	// references before probing, so focus has to run first. Rendering order into
+	// the prompt is independent of this and comes from each block's Priority.
 	memoryList := []pipeline.MemoryLayer{
+		memory.NewFocusMemory(focusStore, analyst),
 		memory.NewShortTermMemory(memoryStore),
 		memory.NewMidTermMemory(memoryStore, factStore, analyst, embedder),
 	}
@@ -98,6 +100,17 @@ func main() {
 	// Promotions are published on a buffered channel; without a running
 	// dispatcher the layers fill it and then start dropping claimed events.
 	go engine.RunPromotions(ctx)
+
+	// Nothing a request does can promote a conversation that simply stopped, or
+	// recover a release whose ingest died. Both leave the short-term window
+	// growing without bound, so they need a clock rather than a turn.
+	go pipeline.NewSweeper(memoryStore, engine.Publisher(), pipeline.SweeperConfig{
+		Interval:    time.Minute,
+		IdleGap:     memory.SessionIdleGap,
+		Lease:       5 * time.Minute,
+		SourceLayer: memory.ShortTermMemoryTag,
+		TargetLayer: memory.MidTermMemoryName,
+	}).Run(ctx)
 
 	cfg := api.GetConfigFromEnv()
 

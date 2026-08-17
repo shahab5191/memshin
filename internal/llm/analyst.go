@@ -161,6 +161,70 @@ func (a *Analyst) ExtractFacts(ctx context.Context, transcript string) ([]Extrac
 	return facts, nil
 }
 
+const focusInstruction = `You track what a conversation is currently about.
+
+You receive the latest exchange and the topics currently being tracked. Return the
+topics under discussion as of this exchange.
+
+Rules:
+- When a tracked topic is still being discussed, repeat its phrase EXACTLY as given.
+  Reusing the wording is what keeps it recognised as the same topic instead of
+  accumulating near-duplicates beside it.
+- Add a topic only when the exchange genuinely introduces one.
+- Drop topics the conversation has moved on from. Being forgotten costs one turn
+  of weaker context; a topic that lingers steers everything that follows toward
+  something nobody is discussing.
+- Phrase new topics as short noun phrases: "the mid-term schema", not "the user
+  asked about how the mid-term schema should be laid out".
+- Return at most 7. Prefer fewer.`
+
+// ExtractFocus reports the topics under discussion after an exchange, given the
+// ones already tracked.
+func (a *Analyst) ExtractFocus(
+	ctx context.Context,
+	prompt, response string,
+	current []string,
+) ([]string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return nil, nil
+	}
+
+	schema := &genai.Schema{
+		Type:  genai.TypeArray,
+		Items: &genai.Schema{Type: genai.TypeString},
+	}
+
+	var input strings.Builder
+	if len(current) > 0 {
+		input.WriteString("Currently tracked topics:\n")
+		for _, c := range current {
+			input.WriteString("- ")
+			input.WriteString(c)
+			input.WriteByte('\n')
+		}
+	} else {
+		input.WriteString("Currently tracked topics: none\n")
+	}
+	input.WriteString("\nLatest exchange:\nuser: ")
+	input.WriteString(prompt)
+	input.WriteString("\nassistant: ")
+	input.WriteString(response)
+
+	var phrases []string
+	if err := a.structured(ctx, focusInstruction, input.String(), schema, &phrases); err != nil {
+		return nil, fmt.Errorf("%s: extract focus: %w", a.Name(), err)
+	}
+
+	out := make([]string, 0, len(phrases))
+	for _, p := range phrases {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+
+	return out, nil
+}
+
 const decomposeInstruction = `You turn a user's message into search probes for a memory store
 holding facts about that user from earlier conversations.
 

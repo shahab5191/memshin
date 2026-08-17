@@ -25,6 +25,14 @@ type Conversation struct {
 	PublishVersion int32
 }
 
+type FocusItem struct {
+	UserID        string
+	Phrase        string
+	Hits          int32
+	FirstSeenAt   time.Time
+	LastTouchedAt time.Time
+}
+
 type MidTermFact struct {
 	ID             uuid.UUID
 	UserID         string

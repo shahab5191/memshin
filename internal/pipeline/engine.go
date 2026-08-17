@@ -113,3 +113,9 @@ func (e *Engine) Process(ctx context.Context, userID, prompt, sysMsg string) (st
 
 	return r, nil
 }
+
+// Publisher exposes the engine's promotion publisher so work that no request
+// drives — the sweeper — can ring the same doorbell the layers do.
+func (e *Engine) Publisher() Publisher {
+	return e.pub
+}
