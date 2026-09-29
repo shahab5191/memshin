@@ -20,122 +20,31 @@ type AppendTurnParams struct {
 	Content string
 }
 
-const claimPromotable = `-- name: ClaimPromotable :one
-WITH backlog AS (
-    SELECT b.seq
-    FROM conversation b
-    WHERE b.user_id = $1
-      AND b.publish_status = 'pending'
-),
-batch AS (
-    SELECT seq
-    FROM backlog
-    -- All-or-nothing gate: under the threshold, or with a release still
-    -- outstanding, this yields no rows and the update below is a no-op.
-    WHERE (SELECT count(*) FROM backlog) >= $2::bigint
-      AND NOT EXISTS (
-          SELECT 1
-          FROM conversation p
-          WHERE p.user_id = $1
-            AND p.publish_status = 'published'
-      )
-    ORDER BY seq ASC
-    -- The newest @recent_floor messages stay pending, so the live thread is
-    -- never handed away mid-conversation.
-    --
-    -- greatest() is not decoration. Postgres evaluates LIMIT even when the
-    -- gate above has already excluded every row, so a backlog shorter than the
-    -- floor — every conversation's first turn — would otherwise abort the
-    -- statement with "LIMIT must not be negative".
-    LIMIT greatest((SELECT count(*) FROM backlog) - $3::bigint, 0)
-),
-claimed AS (
-    UPDATE conversation c
-    SET publish_status  = 'published',
-        published_at    = now(),
-        -- One version for the whole release, not per row. A batch can mix rows
-        -- that were reclaimed from an earlier release with rows that have never
-        -- left, and those carry different counters; taking the user's high-water
-        -- mark gives the batch a single value to be acknowledged under.
-        publish_version = (
-            SELECT coalesce(max(v.publish_version), 0) + 1
-            FROM conversation v
-            WHERE v.user_id = $1
-        )
-    WHERE c.seq IN (SELECT batch.seq FROM batch)
-      -- Re-evaluated under the row lock: if a concurrent turn for this user
-      -- claimed the same batch first, the row is no longer pending and is
-      -- skipped instead of being published twice.
-      AND c.publish_status = 'pending'
-    RETURNING c.seq
+const claimBatch = `-- name: ClaimBatch :many
+WITH oldest AS (
+    SELECT min(publish_version) AS version
+    FROM conversation
+    WHERE user_id = $1
+      AND stage = $2
+      AND publish_status = 'published'
 )
-SELECT count(*)::bigint AS released FROM claimed
+UPDATE conversation c
+SET publish_status = 'processing',
+    claimed_at      = now()
+FROM oldest
+WHERE c.user_id = $1
+  AND c.stage = $2
+  AND c.publish_status = 'published'
+  AND c.publish_version = oldest.version
+RETURNING c.seq, c.id, c.user_id, c.turn_id, c.role, c.content, c.created_at, c.publish_version
 `
 
-type ClaimPromotableParams struct {
-	UserID      string
-	Threshold   int64
-	RecentFloor int64
+type ClaimBatchParams struct {
+	UserID string
+	Stage  string
 }
 
-// ClaimPromotable releases the backlog above the recent floor to mid-term. It
-// is a dam, not a tap: two conditions must hold before anything is let go.
-//
-// The backlog must have grown past @threshold, so mid-term receives whole
-// stretches of conversation instead of one exchange per turn. And nothing this
-// user published earlier may still be unacknowledged, because a release that
-// never lands must not be followed by a later one — mid-term can recover from
-// being behind, but not from a hole in the middle of its history.
-//
-// Everything above the floor goes at once, uncapped. How much fits in one
-// summarisation is mid-term's business, and it acknowledges in whatever
-// chunks suit it.
-func (q *Queries) ClaimPromotable(ctx context.Context, arg ClaimPromotableParams) (int64, error) {
-	row := q.db.QueryRow(ctx, claimPromotable, arg.UserID, arg.Threshold, arg.RecentFloor)
-	var released int64
-	err := row.Scan(&released)
-	return released, err
-}
-
-const markPromoted = `-- name: MarkPromoted :execrows
-UPDATE conversation
-SET publish_status = 'promoted'
-WHERE user_id = $1
-  AND turn_id = ANY($2::uuid[])
-  AND publish_status = 'published'
-  AND publish_version = $3::int
-`
-
-type MarkPromotedParams struct {
-	UserID         string
-	TurnIds        []uuid.UUID
-	PublishVersion int32
-}
-
-// MarkPromoted acknowledges the turns mid-term has durably stored, dropping
-// them out of the short-term window.
-//
-// The version fences the write. A worker whose lease expired mid-summary has
-// had its batch reclaimed and republished under a higher version, so its late
-// acknowledgement matches no rows rather than promoting messages that another
-// worker now owns. Zero rows affected means exactly that, and is not an error.
-func (q *Queries) MarkPromoted(ctx context.Context, arg MarkPromotedParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markPromoted, arg.UserID, arg.TurnIds, arg.PublishVersion)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
-const publishedBatch = `-- name: PublishedBatch :many
-SELECT seq, id, user_id, turn_id, role, content, created_at, publish_version
-FROM conversation
-WHERE user_id = $1
-  AND publish_status = 'published'
-ORDER BY seq ASC
-`
-
-type PublishedBatchRow struct {
+type ClaimBatchRow struct {
 	Seq            int64
 	ID             uuid.UUID
 	UserID         string
@@ -146,18 +55,20 @@ type PublishedBatchRow struct {
 	PublishVersion int32
 }
 
-// PublishedBatch is what mid-term reads when the doorbell rings: everything
-// released to it and not yet acknowledged. publish_version travels with the
-// rows because acknowledging requires it.
-func (q *Queries) PublishedBatch(ctx context.Context, userID string) ([]PublishedBatchRow, error) {
-	rows, err := q.db.Query(ctx, publishedBatch, userID)
+// ClaimBatch atomically claims the oldest unclaimed batch for a layer. The
+// claim is the mutual-exclusion point: the UPDATE transitions the rows to
+// 'processing' under the row lock, so two workers racing for the same user get
+// exactly one batch between them — the loser's RETURNING is empty and it exits
+// without a summarisation.
+func (q *Queries) ClaimBatch(ctx context.Context, arg ClaimBatchParams) ([]ClaimBatchRow, error) {
+	rows, err := q.db.Query(ctx, claimBatch, arg.UserID, arg.Stage)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []PublishedBatchRow
+	var items []ClaimBatchRow
 	for rows.Next() {
-		var i PublishedBatchRow
+		var i ClaimBatchRow
 		if err := rows.Scan(
 			&i.Seq,
 			&i.ID,
@@ -176,6 +87,109 @@ func (q *Queries) PublishedBatch(ctx context.Context, userID string) ([]Publishe
 		return nil, err
 	}
 	return items, nil
+}
+
+const markPromoted = `-- name: MarkPromoted :execrows
+UPDATE conversation
+SET publish_status = 'promoted'
+WHERE user_id = $1
+  AND turn_id = ANY($2::uuid[])
+  AND stage = $3
+  AND publish_status = 'processing'
+  AND publish_version = $4::int
+`
+
+type MarkPromotedParams struct {
+	UserID         string
+	TurnIds        []uuid.UUID
+	Stage          string
+	PublishVersion int32
+}
+
+// MarkPromoted acknowledges the turns a downstream layer has durably stored,
+// dropping them out of the short-term window.
+//
+// The version fences the write. A worker whose lease expired mid-summary has
+// had its batch reclaimed and republished under a higher version, so its late
+// acknowledgement matches no rows rather than promoting messages that another
+// worker now owns. Zero rows affected means exactly that, and is not an error.
+func (q *Queries) MarkPromoted(ctx context.Context, arg MarkPromotedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markPromoted,
+		arg.UserID,
+		arg.TurnIds,
+		arg.Stage,
+		arg.PublishVersion,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const releaseBatch = `-- name: ReleaseBatch :one
+WITH backlog AS (
+    SELECT b.seq
+    FROM conversation b
+    WHERE b.user_id = $1
+      AND b.publish_status = 'pending'
+),
+batch AS (
+    SELECT seq
+    FROM backlog
+    -- @threshold is recent_floor + batch_size, computed by the caller: a full
+    -- batch must be available above the floor before anything is released.
+    WHERE (SELECT count(*) FROM backlog) >= $2::bigint
+    ORDER BY seq ASC
+    LIMIT $3::bigint
+),
+released AS (
+    UPDATE conversation c
+    SET publish_status  = 'published',
+        published_at    = now(),
+        stage           = $4,
+        -- One version for the whole release, not per row. Taking the user's
+        -- high-water mark gives the batch a single value to be acknowledged
+        -- under, and lets the claim query pick the oldest unclaimed batch.
+        publish_version = (
+            SELECT coalesce(max(v.publish_version), 0) + 1
+            FROM conversation v
+            WHERE v.user_id = $1
+        )
+    WHERE c.seq IN (SELECT batch.seq FROM batch)
+      -- Re-evaluated under the row lock: if a concurrent turn for this user
+      -- released the same batch first, the row is no longer pending and is
+      -- skipped instead of being published twice.
+      AND c.publish_status = 'pending'
+    RETURNING c.seq
+)
+SELECT count(*)::bigint AS released FROM released
+`
+
+type ReleaseBatchParams struct {
+	UserID    string
+	Threshold int64
+	BatchSize int64
+	Stage     string
+}
+
+// ReleaseBatch hands a bounded, versioned batch of backlog to mid-term. It is
+// a tap that pours a fixed measure, not the old dam that held everything back:
+// nothing here waits for an earlier release to be acknowledged, because batches
+// are versioned and consumed oldest-first, so several may be in flight at once.
+//
+// A release fires only once a full batch has accumulated above the floor, so
+// mid-term receives whole stretches (eight messages) rather than one exchange
+// per turn, and never an unbounded backlog at once.
+func (q *Queries) ReleaseBatch(ctx context.Context, arg ReleaseBatchParams) (int64, error) {
+	row := q.db.QueryRow(ctx, releaseBatch,
+		arg.UserID,
+		arg.Threshold,
+		arg.BatchSize,
+		arg.Stage,
+	)
+	var released int64
+	err := row.Scan(&released)
+	return released, err
 }
 
 const shortTermWindow = `-- name: ShortTermWindow :many

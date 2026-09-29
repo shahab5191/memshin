@@ -46,6 +46,10 @@ func NewEngine(memory []MemoryLayer, llm LLMProvider) *Engine {
 	}
 }
 
+// RunPromotions drains the promotion channel and dispatches each event to the
+// layer named as its target. Run N copies of it to form a worker pool: the
+// database claim — not the goroutine count — is what guarantees each batch is
+// summarised exactly once, so any number of workers may drain the same channel.
 func (e *Engine) RunPromotions(ctx context.Context) {
 	for {
 		select {

@@ -22,4 +22,6 @@ type Conversation struct {
 	PublishStatus  string
 	PublishedAt    pgtype.Timestamptz
 	PublishVersion int32
+	Stage          string
+	ClaimedAt      pgtype.Timestamptz
 }

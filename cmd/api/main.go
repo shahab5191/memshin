@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 	"github.com/shahab5191/memshin/internal/api"
@@ -15,6 +16,12 @@ import (
 	"github.com/shahab5191/memshin/internal/pipeline"
 	"github.com/shahab5191/memshin/internal/repository"
 )
+
+// defaultPromotionWorkers is the number of dispatcher goroutines draining the
+// promotion channel when PROMOTION_WORKERS is unset. The database claim — not
+// this count — guarantees each batch is summarised once, so it is a throughput
+// knob, not a correctness one.
+const defaultPromotionWorkers = 4
 
 func buildDSN() string {
 	host := os.Getenv("POSTGRES_HOST")
@@ -69,7 +76,19 @@ func main() {
 
 	// Promotions are published on a buffered channel; without a running
 	// dispatcher the layers fill it and then start dropping claimed events.
-	go engine.RunPromotions(ctx)
+	// Run a small pool of them so a slow summarisation for one user does not
+	// stall the drain loop for everyone else.
+	workers := defaultPromotionWorkers
+	if raw := os.Getenv("PROMOTION_WORKERS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			workers = n
+		} else {
+			log.Printf("invalid PROMOTION_WORKERS %q, using default %d", raw, defaultPromotionWorkers)
+		}
+	}
+	for i := 0; i < workers; i++ {
+		go engine.RunPromotions(ctx)
+	}
 
 	cfg := api.GetConfigFromEnv()
 

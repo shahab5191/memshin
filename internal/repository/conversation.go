@@ -18,6 +18,11 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+// StageMidTerm is the promotion stage short-term releases into and mid-term
+// consumes. Every row carries it so a consumer only claims rows released to its
+// own layer once more layers are added.
+const StageMidTerm = "mid-term"
+
 type Message struct {
 	ID        uuid.UUID
 	TurnID    uuid.UUID
@@ -106,16 +111,16 @@ func (c *Conversations) ShortTermWindow(ctx context.Context, userID string, rece
 	return messages, nil
 }
 
-// PublishedBatch is a set of messages released to a downstream layer and not
-// yet acknowledged, together with the version they must be acknowledged under.
-type PublishedBatch struct {
+// Batch is a set of messages a downstream layer has claimed for summarisation,
+// together with the version they must be acknowledged under.
+type Batch struct {
 	Messages []Message
 	Version  int32
 }
 
 // TurnIDs returns the distinct turns in the batch, in order, which is the unit
 // MarkPromoted acknowledges in.
-func (b PublishedBatch) TurnIDs() []uuid.UUID {
+func (b Batch) TurnIDs() []uuid.UUID {
 	ids := make([]uuid.UUID, 0, len(b.Messages))
 	var last uuid.UUID
 	for _, m := range b.Messages {
@@ -127,53 +132,60 @@ func (b PublishedBatch) TurnIDs() []uuid.UUID {
 	return ids
 }
 
-// ClaimPromotable releases everything above recentFloor to the next layer, but
-// only once the backlog has reached threshold and no earlier release is still
-// unacknowledged. It returns how many messages it let go, which is zero on
-// every turn that does not trip the gate.
-func (c *Conversations) ClaimPromotable(ctx context.Context, userID string, threshold, recentFloor int) (int64, error) {
+// ReleaseBatch releases a bounded, versioned batch of backlog to the given
+// stage, but only once a full batch has accumulated above the floor. It returns
+// how many messages it let go, which is zero on every turn without a full batch
+// available. Releases never wait for an earlier release to be acknowledged:
+// batches are versioned and consumed oldest-first, so several may be in flight.
+func (c *Conversations) ReleaseBatch(
+	ctx context.Context,
+	userID, stage string,
+	threshold, batchSize int,
+) (int64, error) {
 	if userID == "" {
-		return 0, fmt.Errorf("claim promotable: empty user id")
+		return 0, fmt.Errorf("release batch: empty user id")
 	}
-	if recentFloor < 0 {
-		return 0, fmt.Errorf("claim promotable: negative recent floor %d", recentFloor)
+	if stage == "" {
+		return 0, fmt.Errorf("release batch: empty stage")
 	}
-	// The query releases (backlog - recentFloor) rows once the backlog reaches
-	// threshold. Were threshold the smaller of the two, that count would go
-	// negative and Postgres would reject the LIMIT outright.
-	if threshold <= recentFloor {
+	// threshold is recentFloor + batchSize, so it must exceed batchSize.
+	if threshold <= batchSize {
 		return 0, fmt.Errorf(
-			"claim promotable: threshold %d must exceed recent floor %d", threshold, recentFloor)
+			"release batch: threshold %d must exceed batch size %d", threshold, batchSize)
 	}
 
-	released, err := c.q.ClaimPromotable(ctx, sqlc.ClaimPromotableParams{
-		UserID:      userID,
-		Threshold:   int64(threshold),
-		RecentFloor: int64(recentFloor),
+	released, err := c.q.ReleaseBatch(ctx, sqlc.ReleaseBatchParams{
+		UserID:    userID,
+		Threshold: int64(threshold),
+		BatchSize: int64(batchSize),
+		Stage:     stage,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("claim promotable: %w", err)
+		return 0, fmt.Errorf("release batch: %w", err)
 	}
 
 	return released, nil
 }
 
-// PublishedBatch returns the messages released to a downstream layer and still
-// awaiting acknowledgement. It is empty when nothing is outstanding.
-func (c *Conversations) PublishedBatch(ctx context.Context, userID string) (PublishedBatch, error) {
+// ClaimBatch atomically claims the oldest unclaimed batch released to the given
+// stage, transitioning it to 'processing' under the row lock. It is empty
+// (Version 0, no messages) when there is nothing to summarise; a worker that
+// loses the race to another gets exactly that empty result and exits without a
+// summarisation.
+func (c *Conversations) ClaimBatch(ctx context.Context, userID, stage string) (Batch, error) {
 	if userID == "" {
-		return PublishedBatch{}, fmt.Errorf("published batch: empty user id")
+		return Batch{}, fmt.Errorf("claim batch: empty user id")
 	}
 
-	rows, err := c.q.PublishedBatch(ctx, userID)
+	rows, err := c.q.ClaimBatch(ctx, sqlc.ClaimBatchParams{UserID: userID, Stage: stage})
 	if err != nil {
-		return PublishedBatch{}, fmt.Errorf("published batch: %w", err)
+		return Batch{}, fmt.Errorf("claim batch: %w", err)
 	}
 	if len(rows) == 0 {
-		return PublishedBatch{}, nil
+		return Batch{}, nil
 	}
 
-	batch := PublishedBatch{
+	batch := Batch{
 		Messages: make([]Message, 0, len(rows)),
 		Version:  rows[0].PublishVersion,
 	}
@@ -187,12 +199,12 @@ func (c *Conversations) PublishedBatch(ctx context.Context, userID string) (Publ
 			Seq:       r.Seq,
 			CreatedAt: r.CreatedAt,
 		})
-		// A release is stamped with one version, so a mismatch means two
-		// releases are outstanding at once — which the claim gate is supposed
-		// to make impossible. Fail loudly rather than acknowledge half a batch.
+		// A claim is stamped with one version, so a mismatch means the claim
+		// spans two releases — which claiming by min(version) makes impossible.
+		// Fail loudly rather than acknowledge half a batch.
 		if r.PublishVersion != batch.Version {
-			return PublishedBatch{}, fmt.Errorf(
-				"published batch: mixed publish versions %d and %d for user %s",
+			return Batch{}, fmt.Errorf(
+				"claim batch: mixed publish versions %d and %d for user %s",
 				batch.Version, r.PublishVersion, userID)
 		}
 	}
@@ -206,7 +218,7 @@ func (c *Conversations) PublishedBatch(ctx context.Context, userID string) (Publ
 // while this caller was working — and is not an error.
 func (c *Conversations) MarkPromoted(
 	ctx context.Context,
-	userID string,
+	userID, stage string,
 	turnIDs []uuid.UUID,
 	version int32,
 ) (int64, error) {
@@ -220,6 +232,7 @@ func (c *Conversations) MarkPromoted(
 	n, err := c.q.MarkPromoted(ctx, sqlc.MarkPromotedParams{
 		UserID:         userID,
 		TurnIds:        turnIDs,
+		Stage:          stage,
 		PublishVersion: version,
 	})
 	if err != nil {

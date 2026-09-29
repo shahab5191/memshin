@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/shahab5191/memshin/internal/pipeline"
 	"github.com/shahab5191/memshin/internal/repository"
@@ -21,21 +22,26 @@ const (
 	// summarised elsewhere.
 	RecentMessageFloor = 8
 
-	// PromotionThreshold is how far the backlog is allowed to run past the
-	// floor before short term releases the excess. Eight messages of slack
-	// means mid-term is handed four exchanges at a time rather than one per
-	// turn, which is the difference between summarising a stretch of
-	// conversation and summarising a single reply.
-	//
-	// The margin over the floor is what a release hands away, so this must
-	// stay above RecentMessageFloor.
-	PromotionThreshold = 16
+	// PromotionBatchSize is how many messages each release hands to mid-term.
+	// A release fires only once a full batch has accumulated above the floor,
+	// so mid-term summarises a fixed-size stretch (four exchanges) rather than
+	// a couple of messages per turn, and never an unbounded backlog at once.
+	PromotionBatchSize = 8
 )
+
+// promotionThreshold is the backlog size at which a full batch is available
+// above the floor: a release fires when at least batchSize messages are queued
+// beyond the floor, and hands over exactly batchSize of them.
+const promotionThreshold = RecentMessageFloor + PromotionBatchSize
+
+// releaseTimeout bounds the detached release work so a slow or stalled database
+// cannot leak goroutines forever.
+const releaseTimeout = 10 * time.Second
 
 type conversationStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
 	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
-	ClaimPromotable(ctx context.Context, userID string, threshold, recentFloor int) (int64, error)
+	ReleaseBatch(ctx context.Context, userID, stage string, threshold, batchSize int) (int64, error)
 }
 
 type ShortTermMemory struct {
@@ -84,11 +90,13 @@ func (stm *ShortTermMemory) ResponseProcess(
 	return nil
 }
 
-// publishPromotable hands the claimed messages to mid-term by ringing a
-// doorbell: the event says only whose turn it is, and mid-term reads the rows
-// it has been given from the store. Failures here are logged, never returned —
-// the turn itself is already durable, and the claim stands in the database
-// whether or not the notification lands.
+// publishPromotable hands a released batch to mid-term by ringing a doorbell:
+// the event says only whose turn it is, and mid-term reads the rows it has been
+// given from the store. It runs on a detached context in its own goroutine, so
+// the response path never waits on the release and the request's cancellation
+// cannot abort it. Failures here are logged, never returned — the turn itself
+// is already durable, and the release stands in the database whether or not the
+// notification lands.
 func (stm *ShortTermMemory) publishPromotable(
 	ctx context.Context,
 	userID string,
@@ -98,25 +106,31 @@ func (stm *ShortTermMemory) publishPromotable(
 		return // no dispatcher wired
 	}
 
-	released, err := stm.store.ClaimPromotable(ctx, userID, PromotionThreshold, RecentMessageFloor)
-	if err != nil {
-		slog.Error("claim promotable failed", "layer", stm.Name(), "user", userID, "error", err)
-		return
-	}
-	if released == 0 {
-		return // backlog still under the threshold, or an earlier release is outstanding
-	}
+	go func() {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+		defer cancel()
 
-	event := pipeline.PromotionEvent{
-		UserID:      userID,
-		SourceLayer: stm.Name(),
-		TargetLayer: MidTermMemoryName,
-	}
+		released, err := stm.store.ReleaseBatch(
+			releaseCtx, userID, repository.StageMidTerm, promotionThreshold, PromotionBatchSize)
+		if err != nil {
+			slog.Error("release batch failed", "layer", stm.Name(), "user", userID, "error", err)
+			return
+		}
+		if released == 0 {
+			return // no full batch available above the floor yet
+		}
 
-	if err := pub.Publish(ctx, event); err != nil {
-		slog.Warn("promotion not published",
-			"layer", stm.Name(), "user", userID, "messages", released, "error", err)
-	}
+		event := pipeline.PromotionEvent{
+			UserID:      userID,
+			SourceLayer: stm.Name(),
+			TargetLayer: MidTermMemoryName,
+		}
+
+		if err := pub.Publish(releaseCtx, event); err != nil {
+			slog.Warn("promotion not published",
+				"layer", stm.Name(), "user", userID, "messages", released, "error", err)
+		}
+	}()
 }
 
 func (stm *ShortTermMemory) HandlePromotion(
