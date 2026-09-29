@@ -136,9 +136,9 @@ WITH backlog AS (
 batch AS (
     SELECT seq
     FROM backlog
-    -- @threshold is recent_floor + batch_size, computed by the caller: a full
-    -- batch must be available above the floor before anything is released.
-    WHERE (SELECT count(*) FROM backlog) >= $2::bigint
+    -- A full batch must be available above the floor before anything is
+    -- released, so mid-term is never handed a couple of messages per turn.
+    WHERE (SELECT count(*) FROM backlog) - $2::bigint >= $3::bigint
     ORDER BY seq ASC
     LIMIT $3::bigint
 ),
@@ -166,10 +166,10 @@ SELECT count(*)::bigint AS released FROM released
 `
 
 type ReleaseBatchParams struct {
-	UserID    string
-	Threshold int64
-	BatchSize int64
-	Stage     string
+	UserID      string
+	RecentFloor int64
+	BatchSize   int64
+	Stage       string
 }
 
 // ReleaseBatch hands a bounded, versioned batch of backlog to mid-term. It is
@@ -183,7 +183,7 @@ type ReleaseBatchParams struct {
 func (q *Queries) ReleaseBatch(ctx context.Context, arg ReleaseBatchParams) (int64, error) {
 	row := q.db.QueryRow(ctx, releaseBatch,
 		arg.UserID,
-		arg.Threshold,
+		arg.RecentFloor,
 		arg.BatchSize,
 		arg.Stage,
 	)

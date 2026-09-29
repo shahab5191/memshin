@@ -20,9 +20,9 @@ WITH backlog AS (
 batch AS (
     SELECT seq
     FROM backlog
-    -- @threshold is recent_floor + batch_size, computed by the caller: a full
-    -- batch must be available above the floor before anything is released.
-    WHERE (SELECT count(*) FROM backlog) >= @threshold::bigint
+    -- A full batch must be available above the floor before anything is
+    -- released, so mid-term is never handed a couple of messages per turn.
+    WHERE (SELECT count(*) FROM backlog) - @recent_floor::bigint >= @batch_size::bigint
     ORDER BY seq ASC
     LIMIT @batch_size::bigint
 ),

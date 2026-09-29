@@ -29,11 +29,6 @@ const (
 	PromotionBatchSize = 8
 )
 
-// promotionThreshold is the backlog size at which a full batch is available
-// above the floor: a release fires when at least batchSize messages are queued
-// beyond the floor, and hands over exactly batchSize of them.
-const promotionThreshold = RecentMessageFloor + PromotionBatchSize
-
 // releaseTimeout bounds the detached release work so a slow or stalled database
 // cannot leak goroutines forever.
 const releaseTimeout = 10 * time.Second
@@ -41,7 +36,7 @@ const releaseTimeout = 10 * time.Second
 type conversationStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
 	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
-	ReleaseBatch(ctx context.Context, userID, stage string, threshold, batchSize int) (int64, error)
+	ReleaseBatch(ctx context.Context, userID, stage string, recentFloor, batchSize int) (int64, error)
 }
 
 type ShortTermMemory struct {
@@ -111,7 +106,7 @@ func (stm *ShortTermMemory) publishPromotable(
 		defer cancel()
 
 		released, err := stm.store.ReleaseBatch(
-			releaseCtx, userID, repository.StageMidTerm, promotionThreshold, PromotionBatchSize)
+			releaseCtx, userID, MidTermMemoryName, RecentMessageFloor, PromotionBatchSize)
 		if err != nil {
 			slog.Error("release batch failed", "layer", stm.Name(), "user", userID, "error", err)
 			return

@@ -18,11 +18,6 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
-// StageMidTerm is the promotion stage short-term releases into and mid-term
-// consumes. Every row carries it so a consumer only claims rows released to its
-// own layer once more layers are added.
-const StageMidTerm = "mid-term"
-
 type Message struct {
 	ID        uuid.UUID
 	TurnID    uuid.UUID
@@ -140,7 +135,7 @@ func (b Batch) TurnIDs() []uuid.UUID {
 func (c *Conversations) ReleaseBatch(
 	ctx context.Context,
 	userID, stage string,
-	threshold, batchSize int,
+	recentFloor, batchSize int,
 ) (int64, error) {
 	if userID == "" {
 		return 0, fmt.Errorf("release batch: empty user id")
@@ -148,17 +143,18 @@ func (c *Conversations) ReleaseBatch(
 	if stage == "" {
 		return 0, fmt.Errorf("release batch: empty stage")
 	}
-	// threshold is recentFloor + batchSize, so it must exceed batchSize.
-	if threshold <= batchSize {
-		return 0, fmt.Errorf(
-			"release batch: threshold %d must exceed batch size %d", threshold, batchSize)
+	if recentFloor < 0 {
+		return 0, fmt.Errorf("release batch: negative recent floor %d", recentFloor)
+	}
+	if batchSize <= 0 {
+		return 0, fmt.Errorf("release batch: non-positive batch size %d", batchSize)
 	}
 
 	released, err := c.q.ReleaseBatch(ctx, sqlc.ReleaseBatchParams{
-		UserID:    userID,
-		Threshold: int64(threshold),
-		BatchSize: int64(batchSize),
-		Stage:     stage,
+		UserID:      userID,
+		RecentFloor: int64(recentFloor),
+		BatchSize:   int64(batchSize),
+		Stage:       stage,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("release batch: %w", err)

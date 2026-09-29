@@ -3,7 +3,7 @@
 -- released to its own layer, and mid-term's claim needs a 'processing' state
 -- plus a lease timestamp for the stale-claim reclaim sweep (Phase B).
 ALTER TABLE conversation
-    ADD COLUMN stage      text NOT NULL DEFAULT 'mid-term',
+    ADD COLUMN stage      text NOT NULL DEFAULT 'MidTermMemory',
     ADD COLUMN claimed_at timestamptz;
 
 -- Widen the lifecycle. The original inline CHECK is auto-named, so drop and
