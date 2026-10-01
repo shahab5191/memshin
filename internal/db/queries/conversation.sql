@@ -112,3 +112,12 @@ WHERE c.user_id = @user_id
      OR c.seq >= (SELECT cutoff.seq FROM cutoff)
   )
 ORDER BY c.seq ASC;
+
+-- Short term memory latest turn messages
+-- name: LatestTurn :many
+SELECT c.seq, c.id, c.user_id, c.turn_id, c.role, c.content, c.created_at
+FROM conversation c
+WHERE c.user_id = @user_id
+  AND c.stage = 'latest'
+  AND c.publish_status = 'published'
+ORDER BY c.seq ASC;

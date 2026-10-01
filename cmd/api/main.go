@@ -68,7 +68,7 @@ func main() {
 	}
 	log.Println("llm provider initialized:", provider.Name())
 
-	memoryList := make([]pipeline.MemoryLayer, 0)
+	memoryList := make([]memory.MemoryLayer, 0)
 	memoryStore := repository.NewConversations(pool)
 	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
 

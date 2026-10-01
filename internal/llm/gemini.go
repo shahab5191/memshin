@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shahab5191/memshin/internal/pipeline"
+	"github.com/shahab5191/memshin/internal/memory"
 	"google.golang.org/genai"
 )
 
@@ -134,7 +134,7 @@ func (g *Gemini) Name() string {
 	return "Gemini/" + g.model
 }
 
-func (g *Gemini) GenerateResponse(ctx context.Context, chat *pipeline.ChatContext) (string, error) {
+func (g *Gemini) GenerateResponse(ctx context.Context, chat *memory.ChatContext) (string, error) {
 	if chat == nil {
 		return "", fmt.Errorf("%s: nil chat context", g.Name())
 	}
@@ -232,7 +232,7 @@ func (g *Gemini) Summarize(ctx context.Context, text string) (string, error) {
 
 // buildPrompt puts the assembled memory ahead of the user's turn so the model
 // reads the recalled context before the question it has to answer.
-func buildPrompt(chat *pipeline.ChatContext) string {
+func buildPrompt(chat *memory.ChatContext) string {
 	memory := chat.RenderMemory()
 	if memory == "" {
 		return chat.OriginalPrompt

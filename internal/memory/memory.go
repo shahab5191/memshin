@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/shahab5191/memshin/internal/promotion"
 	"github.com/shahab5191/memshin/internal/repository"
 )
 
@@ -14,12 +15,23 @@ const (
 	FocusMemoryName     = "FocusMemory"
 )
 
+// MemoryLayer is the contract every memory stage implements. The pipeline
+// engine iterates over a slice of these: assembling context before generation,
+// recording the turn after, and handling promotion doorbells dispatched by name.
+type MemoryLayer interface {
+	Name() string
+	RequestProcess(ctx context.Context, chat *ChatContext) error
+	ResponseProcess(ctx context.Context, chat *ChatContext, llmResponse string, pub promotion.Publisher) error
+	HandlePromotion(ctx context.Context, event promotion.Event, pub promotion.Publisher) error
+}
+
 // shortTermStore is what the short-term layer needs: append turns, read its
 // window, and release bounded batches downstream.
 type shortTermStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
 	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
 	ReleaseBatch(ctx context.Context, userID, stage string, recentFloor, batchSize int) (int64, error)
+	LatestTurn(ctx context.Context, userID string) ([]repository.Message, error)
 }
 
 // promotionStore is what a downstream layer needs to consume released batches:

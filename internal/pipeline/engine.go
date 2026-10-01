@@ -5,6 +5,9 @@ import (
 	"errors"
 	"log"
 	"log/slog"
+
+	"github.com/shahab5191/memshin/internal/memory"
+	"github.com/shahab5191/memshin/internal/promotion"
 )
 
 // promotionBuffer is generous because an event is three strings. Depth is
@@ -17,29 +20,22 @@ const promotionBuffer = 4096
 // for that user — or the reclaim sweep — picks the work up again.
 var ErrPromotionQueueFull = errors.New("promotion queue full")
 
-type MemoryLayer interface {
-	Name() string
-	RequestProcess(ctx context.Context, chat *ChatContext) error
-	ResponseProcess(ctx context.Context, chat *ChatContext, llmResponse string, pub Publisher) error
-	HandlePromotion(ctx context.Context, event PromotionEvent, pub Publisher) error
-}
-
 type LLMProvider interface {
 	Name() string
-	GenerateResponse(ctx context.Context, chat *ChatContext) (string, error)
+	GenerateResponse(ctx context.Context, chat *memory.ChatContext) (string, error)
 }
 
 type Engine struct {
-	memory []MemoryLayer
+	memory []memory.MemoryLayer
 	llm    LLMProvider
-	promCh chan PromotionEvent
-	pub    Publisher
+	promCh chan promotion.Event
+	pub    promotion.Publisher
 }
 
-func NewEngine(memory []MemoryLayer, llm LLMProvider) *Engine {
-	promCh := make(chan PromotionEvent, promotionBuffer)
+func NewEngine(layers []memory.MemoryLayer, llm LLMProvider) *Engine {
+	promCh := make(chan promotion.Event, promotionBuffer)
 	return &Engine{
-		memory: memory,
+		memory: layers,
 		llm:    llm,
 		promCh: promCh,
 		pub:    NewChannelPublisher(promCh),
@@ -64,7 +60,7 @@ func (e *Engine) RunPromotions(ctx context.Context) {
 	}
 }
 
-func (e *Engine) dispatch(ctx context.Context, event PromotionEvent) {
+func (e *Engine) dispatch(ctx context.Context, event promotion.Event) {
 	for _, layer := range e.memory {
 		if layer.Name() != event.TargetLayer {
 			continue
@@ -81,11 +77,11 @@ func (e *Engine) dispatch(ctx context.Context, event PromotionEvent) {
 }
 
 func (e *Engine) Process(ctx context.Context, userID, prompt, sysMsg string) (string, error) {
-	chat := &ChatContext{
+	chat := &memory.ChatContext{
 		UserID:         userID,
 		OriginalPrompt: prompt,
 		SystemMessage:  sysMsg,
-		Blocks:         []ContextBlock{},
+		Blocks:         []memory.ContextBlock{},
 	}
 
 	// step 1: assemble context from the memory layers

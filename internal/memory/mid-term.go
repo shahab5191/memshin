@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/shahab5191/memshin/internal/pipeline"
+	"github.com/shahab5191/memshin/internal/promotion"
 	"github.com/shahab5191/memshin/internal/repository"
 )
 
@@ -46,7 +46,7 @@ func (mtm *MidTermMemory) Name() string {
 
 // RequestProcess retrieves the summaries relevant to the current prompt and
 // injects them below short-term (Priority 2 vs short-term's 1).
-func (mtm *MidTermMemory) RequestProcess(ctx context.Context, chat *pipeline.ChatContext) error {
+func (mtm *MidTermMemory) RequestProcess(ctx context.Context, chat *ChatContext) error {
 	if chat.OriginalPrompt == "" {
 		return nil
 	}
@@ -74,7 +74,7 @@ func (mtm *MidTermMemory) RequestProcess(ctx context.Context, chat *pipeline.Cha
 		return nil
 	}
 
-	chat.AddBlock(pipeline.ContextBlock{
+	chat.AddBlock(ContextBlock{
 		Source:   mtm.Name(),
 		Tag:      MidTermMemoryName,
 		Content:  renderSummaries(kept),
@@ -87,9 +87,9 @@ func (mtm *MidTermMemory) RequestProcess(ctx context.Context, chat *pipeline.Cha
 // ResponseProcess is a no-op: mid-term is fed by promotion, not per-turn.
 func (mtm *MidTermMemory) ResponseProcess(
 	ctx context.Context,
-	chat *pipeline.ChatContext,
+	chat *ChatContext,
 	llmResponse string,
-	pub pipeline.Publisher,
+	pub promotion.Publisher,
 ) error {
 	return nil
 }
@@ -97,7 +97,7 @@ func (mtm *MidTermMemory) ResponseProcess(
 // HandlePromotion drains to quiescence: it claims and stores every outstanding
 // batch for the user, not just the oldest, so a backlog of released batches
 // clears from a single doorbell.
-func (mtm *MidTermMemory) HandlePromotion(ctx context.Context, event pipeline.PromotionEvent, pub pipeline.Publisher) error {
+func (mtm *MidTermMemory) HandlePromotion(ctx context.Context, event promotion.Event, pub promotion.Publisher) error {
 	for {
 		batch, err := mtm.store.ClaimBatch(ctx, event.UserID, MidTermMemoryName)
 		if err != nil {

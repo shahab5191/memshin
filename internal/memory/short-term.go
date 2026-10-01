@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shahab5191/memshin/internal/pipeline"
+	"github.com/shahab5191/memshin/internal/promotion"
 	"github.com/shahab5191/memshin/internal/repository"
 )
 
@@ -30,7 +30,7 @@ func (stm *ShortTermMemory) Name() string {
 	return ShortTermMemoryName
 }
 
-func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *pipeline.ChatContext) error {
+func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *ChatContext) error {
 	messages, err := stm.store.ShortTermWindow(ctx, chat.UserID, RecentMessageFloor)
 	if err != nil {
 		return fmt.Errorf("%s: load conversation: %w", stm.Name(), err)
@@ -39,7 +39,7 @@ func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *pipeline.C
 		return nil // first turn — nothing to inject
 	}
 
-	chat.AddBlock(pipeline.ContextBlock{
+	chat.AddBlock(ContextBlock{
 		Source:   stm.Name(),
 		Tag:      ShortTermMemoryName,
 		Content:  renderMessages(messages),
@@ -51,24 +51,46 @@ func (stm *ShortTermMemory) RequestProcess(ctx context.Context, chat *pipeline.C
 
 func (stm *ShortTermMemory) ResponseProcess(
 	ctx context.Context,
-	chat *pipeline.ChatContext,
+	chat *ChatContext,
 	llmResponse string,
-	pub pipeline.Publisher,
+	pub promotion.Publisher,
 ) error {
 	if err := stm.store.AppendTurn(ctx, chat.UserID, chat.OriginalPrompt, llmResponse); err != nil {
 		return fmt.Errorf("%s: append turn: %w", stm.Name(), err)
 	}
 
 	stm.publishPromotable(ctx, chat.UserID, pub)
+	stm.publishFocuseEvent(ctx, chat.UserID, pub)
 
 	return nil
+}
+
+func (stm *ShortTermMemory) publishFocuseEvent(
+	ctx context.Context,
+	userID string,
+	pub promotion.Publisher,
+) {
+	if pub == nil {
+		return // no dispatcher wired
+	}
+
+	event := promotion.Event{
+		UserID:      userID,
+		SourceLayer: stm.Name(),
+		TargetLayer: FocusMemoryName,
+	}
+
+	if err := pub.Publish(ctx, event); err != nil {
+		slog.Warn("promotion not published",
+			"layer", stm.Name(), "user", userID, "error", err)
+	}
 }
 
 // publishPromotable hands a released batch to mid-term by ringing a doorbell
 func (stm *ShortTermMemory) publishPromotable(
 	ctx context.Context,
 	userID string,
-	pub pipeline.Publisher,
+	pub promotion.Publisher,
 ) {
 	if pub == nil {
 		return // no dispatcher wired
@@ -89,7 +111,7 @@ func (stm *ShortTermMemory) publishPromotable(
 			return // no full batch available above the floor yet
 		}
 
-		event := pipeline.PromotionEvent{
+		event := promotion.Event{
 			UserID:      userID,
 			SourceLayer: stm.Name(),
 			TargetLayer: MidTermMemoryName,
@@ -104,8 +126,8 @@ func (stm *ShortTermMemory) publishPromotable(
 
 func (stm *ShortTermMemory) HandlePromotion(
 	ctx context.Context,
-	event pipeline.PromotionEvent,
-	pub pipeline.Publisher,
+	event promotion.Event,
+	pub promotion.Publisher,
 ) error {
 	return nil
 }

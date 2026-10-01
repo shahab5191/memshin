@@ -89,6 +89,54 @@ func (q *Queries) ClaimBatch(ctx context.Context, arg ClaimBatchParams) ([]Claim
 	return items, nil
 }
 
+const latestTurn = `-- name: LatestTurn :many
+SELECT c.seq, c.id, c.user_id, c.turn_id, c.role, c.content, c.created_at
+FROM conversation c
+WHERE c.user_id = $1
+  AND c.stage = 'latest'
+  AND c.publish_status = 'published'
+ORDER BY c.seq ASC
+`
+
+type LatestTurnRow struct {
+	Seq       int64
+	ID        uuid.UUID
+	UserID    string
+	TurnID    uuid.UUID
+	Role      string
+	Content   string
+	CreatedAt time.Time
+}
+
+// Short term memory latest turn messages
+func (q *Queries) LatestTurn(ctx context.Context, userID string) ([]LatestTurnRow, error) {
+	rows, err := q.db.Query(ctx, latestTurn, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LatestTurnRow
+	for rows.Next() {
+		var i LatestTurnRow
+		if err := rows.Scan(
+			&i.Seq,
+			&i.ID,
+			&i.UserID,
+			&i.TurnID,
+			&i.Role,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markPromoted = `-- name: MarkPromoted :execrows
 UPDATE conversation
 SET publish_status = 'promoted'
