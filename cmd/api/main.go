@@ -71,6 +71,13 @@ func main() {
 	memoryList := make([]pipeline.MemoryLayer, 0)
 	memoryStore := repository.NewConversations(pool)
 	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
+
+	// Mid-term sits after short-term so it consumes what short-term releases.
+	// memoryStore doubles as the promotionStore; the Gemini provider supplies
+	// both summarization and embedding.
+	vectorStore := repository.NewMidTermMemory(pool)
+	memoryList = append(memoryList, memory.NewMidTermMemory(memoryStore, vectorStore, provider, provider))
+
 	engine := pipeline.NewEngine(memoryList, provider)
 	log.Println("engine initialized")
 

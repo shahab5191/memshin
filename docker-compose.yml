@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:17
+    # pgvector's image (not vanilla postgres) so the vector extension is
+    # available for the mid-term memory store.
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-memshin}

@@ -19,10 +19,10 @@ const (
 const releaseTimeout = 10 * time.Second
 
 type ShortTermMemory struct {
-	store conversationStore
+	store shortTermStore
 }
 
-func NewShortTermMemory(store conversationStore) *ShortTermMemory {
+func NewShortTermMemory(store shortTermStore) *ShortTermMemory {
 	return &ShortTermMemory{store: store}
 }
 

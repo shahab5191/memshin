@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
+	pgvector "github.com/pgvector/pgvector-go"
 )
 
 type Conversation struct {
@@ -24,4 +25,14 @@ type Conversation struct {
 	PublishVersion int32
 	Stage          string
 	ClaimedAt      pgtype.Timestamptz
+}
+
+type MidTermMemory struct {
+	UserID         string
+	PublishVersion int32
+	Summary        string
+	Embedding      pgvector.Vector
+	StartSeq       int64
+	EndSeq         int64
+	CreatedAt      time.Time
 }

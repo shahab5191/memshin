@@ -7,10 +7,13 @@ import (
 )
 
 type LongTermMemory struct {
-	store conversationStore
+	// Placeholder. Long-term will distill durable facts from mid-term, so it is
+	// expected to read the mid-term vector store; its real dependencies are
+	// decided in the long-term spec.
+	store vectorStore
 }
 
-func NewLongTermMemory(store conversationStore) *LongTermMemory {
+func NewLongTermMemory(store vectorStore) *LongTermMemory {
 	return &LongTermMemory{store: store}
 }
 
