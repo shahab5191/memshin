@@ -11,6 +11,11 @@ type ChatContext struct {
 	OriginalPrompt string
 	SystemMessage  string
 	Blocks         []ContextBlock
+
+	// FocusSubject is the current one-sentence subject, set by the focus layer
+	// during RequestProcess and read by mid-term in the same request to scope its
+	// retrieval query. Empty on a user's first turn or when focus is unavailable.
+	FocusSubject string
 }
 
 type ContextBlock struct {

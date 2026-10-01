@@ -51,7 +51,15 @@ func (mtm *MidTermMemory) RequestProcess(ctx context.Context, chat *ChatContext)
 		return nil
 	}
 
-	embedding, err := mtm.embed.Embed(ctx, chat.OriginalPrompt, retrievalQueryTaskType)
+	// Scope the retrieval by the current subject when focus has one, so the
+	// search recalls facts relevant to the topic rather than to a possibly-terse
+	// prompt alone. Falls back to the prompt on a first turn.
+	query := chat.OriginalPrompt
+	if chat.FocusSubject != "" {
+		query = chat.FocusSubject + "\n" + chat.OriginalPrompt
+	}
+
+	embedding, err := mtm.embed.Embed(ctx, query, retrievalQueryTaskType)
 	if err != nil {
 		return fmt.Errorf("%s: embed prompt: %w", mtm.Name(), err)
 	}

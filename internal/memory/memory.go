@@ -31,7 +31,24 @@ type shortTermStore interface {
 	AppendTurn(ctx context.Context, userID, prompt, response string) error
 	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
 	ReleaseBatch(ctx context.Context, userID, stage string, recentFloor, batchSize int) (int64, error)
-	LatestTurn(ctx context.Context, userID string) ([]repository.Message, error)
+}
+
+// focusSource is what the focus layer reads to extract the current subject: the
+// full short-term window, both sides of every exchange in it.
+type focusSource interface {
+	ShortTermWindow(ctx context.Context, userID string, recentCount int) ([]repository.Message, error)
+}
+
+// focusStore is the focus layer's append-only subject history.
+type focusStore interface {
+	GetFocus(ctx context.Context, userID string) (string, error)
+	InsertFocus(ctx context.Context, userID, subject string, lastTurnSeq int64) error
+}
+
+// extractor distils the current one-sentence subject from the short-term window,
+// deciding whether to keep the existing subject or replace it.
+type extractor interface {
+	Extract(ctx context.Context, currentSubject, text string) (keep bool, subject string, err error)
 }
 
 // promotionStore is what a downstream layer needs to consume released batches:

@@ -249,31 +249,3 @@ func toMessage(r sqlc.ShortTermWindowRow) Message {
 		CreatedAt: r.CreatedAt,
 	}
 }
-
-func (c *Conversations) LatestTurn(ctx context.Context, userID string) ([]Message, error) {
-	if userID == "" {
-		return []Message{}, fmt.Errorf("latest turn: empty user id")
-	}
-	rows, err := c.q.LatestTurn(ctx, userID)
-	if err != nil {
-		return []Message{}, fmt.Errorf("claim batch: %w", err)
-	}
-	if len(rows) == 0 {
-		return []Message{}, nil
-	}
-
-	messages := []Message{}
-	for _, r := range rows {
-		messages = append(messages, Message{
-			ID:        r.ID,
-			TurnID:    r.TurnID,
-			UserID:    r.UserID,
-			Role:      Role(r.Role),
-			Content:   r.Content,
-			Seq:       r.Seq,
-			CreatedAt: r.CreatedAt,
-		})
-	}
-
-	return messages, nil
-}

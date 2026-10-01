@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -34,6 +35,31 @@ Rules:
 - Each fact must stand alone without referring to "the user above" or the conversation itself.
 - Do not narrate the conversation, restate questions, or include greetings, filler, or meta-commentary.
 - Write plain prose, one fact per sentence, as few sentences as possible. Output only the facts.`
+
+// focusSystemPrompt asks the model to track the one-sentence subject of the
+// current conversation, returning whether to keep the existing subject and the
+// subject that now holds.
+const focusSystemPrompt = `You track the current subject of an ongoing conversation as a single sentence.
+
+You are given the current subject (which may be empty) and the latest conversation window. Return JSON with exactly two fields:
+- "keep": true if the current subject still accurately describes the conversation, false if it should change.
+- "content": the one-sentence subject that describes what the conversation is about right now.
+
+If the topic is unchanged, restate the current subject verbatim and set "keep" to true. If it has shifted, set "keep" to false and write the new subject. If there is no current subject yet, set "keep" to false and write the subject.
+
+The subject must be a single self-contained sentence in plain prose. Do not name the participants, and do not include greetings, filler, or meta-commentary.`
+
+// focusExtractSchema pins the extraction output to {"keep": bool, "content":
+// string}. Both fields are required, so the response is always well-formed JSON
+// the layer can decode directly.
+var focusExtractSchema = &genai.Schema{
+	Type: genai.TypeObject,
+	Properties: map[string]*genai.Schema{
+		"keep":    {Type: genai.TypeBoolean},
+		"content": {Type: genai.TypeString},
+	},
+	Required: []string{"keep", "content"},
+}
 
 // GeminiConfig carries everything the provider needs. Zero values fall back to
 // the defaults above so callers only set what they actually care about.
@@ -228,6 +254,66 @@ func (g *Gemini) Summarize(ctx context.Context, text string) (string, error) {
 	}
 
 	return summary, nil
+}
+
+// Extract distils the current one-sentence subject from the conversation window,
+// deciding whether the existing subject still holds. text is the full short-term
+// window (both sides of each exchange); currentSubject may be empty on the first
+// extraction. Structured JSON output is enforced via a response schema.
+func (g *Gemini) Extract(ctx context.Context, currentSubject, text string) (bool, string, error) {
+	if text == "" {
+		return false, "", fmt.Errorf("%s: extract: empty text", g.Name())
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+
+	cfg := *g.genCfg // copy so the system instruction and schema do not leak across calls
+	cfg.SystemInstruction = genai.NewContentFromText(focusSystemPrompt, genai.RoleUser)
+	cfg.ResponseMIMEType = "application/json"
+	cfg.ResponseSchema = focusExtractSchema
+
+	resp, err := g.client.Models.GenerateContent(ctx, g.model, genai.Text(buildFocusPrompt(currentSubject, text)), &cfg)
+	if err != nil {
+		return false, "", fmt.Errorf("%s: extract: generate content: %w", g.Name(), err)
+	}
+
+	if fb := resp.PromptFeedback; fb != nil && fb.BlockReason != "" {
+		return false, "", fmt.Errorf("%s: extract: prompt blocked: %s", g.Name(), fb.BlockReason)
+	}
+	if len(resp.Candidates) == 0 {
+		return false, "", fmt.Errorf("%s: extract: no candidates in response", g.Name())
+	}
+
+	raw := strings.TrimSpace(resp.Text())
+	if raw == "" {
+		return false, "", fmt.Errorf("%s: extract: empty response", g.Name())
+	}
+
+	var out struct {
+		Keep    bool   `json:"keep"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return false, "", fmt.Errorf("%s: extract: decode response: %w", g.Name(), err)
+	}
+
+	return out.Keep, out.Content, nil
+}
+
+// buildFocusPrompt hands the model the current subject alongside the window it
+// must reduce to a single sentence, so it can decide to keep, refine, or replace.
+func buildFocusPrompt(currentSubject, text string) string {
+	var b strings.Builder
+	b.WriteString("Current subject: ")
+	if currentSubject == "" {
+		b.WriteString("(none)")
+	} else {
+		b.WriteString(currentSubject)
+	}
+	b.WriteString("\n\nConversation:\n")
+	b.WriteString(text)
+	return b.String()
 }
 
 // buildPrompt puts the assembled memory ahead of the user's turn so the model

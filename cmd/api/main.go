@@ -72,6 +72,13 @@ func main() {
 	memoryStore := repository.NewConversations(pool)
 	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
 
+	// Focus sits between short-term and mid-term. In RequestProcess it must run
+	// before mid-term so FocusSubject is set for the retrieval query; in
+	// ResponseProcess it must run after short-term so the turn is appended before
+	// focus rings its doorbell.
+	focusStore := repository.NewFocus(pool)
+	memoryList = append(memoryList, memory.NewFocusMemory(memoryStore, focusStore, provider))
+
 	// Mid-term sits after short-term so it consumes what short-term releases.
 	// memoryStore doubles as the promotionStore; the Gemini provider supplies
 	// both summarization and embedding.

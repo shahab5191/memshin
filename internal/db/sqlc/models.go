@@ -27,6 +27,14 @@ type Conversation struct {
 	ClaimedAt      pgtype.Timestamptz
 }
 
+type Focu struct {
+	ID          int64
+	UserID      string
+	Subject     string
+	LastTurnSeq int64
+	CreatedAt   time.Time
+}
+
 type MidTermMemory struct {
 	UserID         string
 	PublishVersion int32
