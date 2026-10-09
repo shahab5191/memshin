@@ -130,6 +130,12 @@ func (fm *FocusMemory) HandlePromotion(
 		return err
 	}
 
+	// An empty topic means nothing substantive has emerged yet; leave the focus
+	// unchanged rather than storing a blank row.
+	if next == "" {
+		return nil
+	}
+
 	// First extraction has no subject to keep; a change always inserts. History
 	// is therefore one row per distinct subject, not one per turn.
 	if !keep || subject == "" {

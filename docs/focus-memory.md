@@ -114,10 +114,14 @@ Extract(ctx context.Context, currentSubject, text string) (keep bool, subject st
 - `text` is the latest exchange rendered as `prompt + "\n" + response`; the
   current subject is passed separately so the model can decide to keep, refine,
   or replace it.
-- Prompt instructs the model to return the one-sentence subject *now* — restate
-  it unchanged if it still holds, refine it, or replace it if the topic changed.
-  On the first turn `currentSubject` is empty and `keep` is meaningless (the
-  layer still inserts whatever `content` comes back).
+- Prompt instructs the model to produce a single concise sentence naming the
+  subject of the conversation and the entities it revolves around (e.g. "Shahab
+  is building a layered memory system for the AI"), restating it verbatim when
+  it still holds and replacing it only when the subject genuinely changes.
+  Facts, decisions, and implementation details are explicitly excluded — they
+  belong to longer-term memory, not focus. Empty `content` means there is no
+  subject yet; the layer leaves focus unchanged instead of inserting a blank
+  row.
 
 The existing per-call timeout applies. No new environment variables are needed;
 a dedicated focus model/temperature is out of scope (see §10).

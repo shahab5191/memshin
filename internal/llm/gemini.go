@@ -41,18 +41,22 @@ Rules:
 - Do not narrate the conversation, restate questions, or include greetings, filler, or meta-commentary.
 - Write plain prose, one fact per sentence, as few sentences as possible. Output only the facts.`
 
-// focusSystemPrompt asks the model to track the one-sentence subject of the
-// current conversation, returning whether to keep the existing subject and the
-// subject that now holds.
-const focusSystemPrompt = `You track the current subject of an ongoing conversation as a single sentence.
+// focusSystemPrompt asks the model to track what the current conversation is
+// about — its subject and the entities involved — returning whether to keep the
+// existing focus and the focus that now holds.
+const focusSystemPrompt = `You track what an ongoing conversation is about: its subject and the people, projects, or objects it revolves around.
 
-You are given the current subject (which may be empty) and the latest conversation window. Return JSON with exactly two fields:
-- "keep": true if the current subject still accurately describes the conversation, false if it should change.
-- "content": the one-sentence subject that describes what the conversation is about right now.
+You are given the current focus (which may be empty) and the latest conversation. Return JSON with exactly two fields:
+- "keep": true if the current focus still captures the conversation, false if it should change.
+- "content": the focus.
 
-If the topic is unchanged, restate the current subject verbatim and set "keep" to true. If it has shifted, set "keep" to false and write the new subject. If there is no current subject yet, set "keep" to false and write the subject.
+The focus is a single concise sentence naming the subject of the conversation and the entities involved, e.g. "Shahab is building a layered memory system for the AI". It is a reminder of what is being discussed, nothing more.
 
-The subject must be a single self-contained sentence in plain prose. Do not name the participants, and do not include greetings, filler, or meta-commentary.`
+It is not a record of facts. Do not include preferences, decisions, commitments, or implementation details — those belong to longer-term memory, not focus. Name an entity only as part of the subject (e.g. "Shahab is building X"), never as a standalone fact (e.g. "the user's name is Shahab"). Do not accumulate: keep only what the conversation is currently about, and drop entities that are no longer central.
+
+Stay stable: set "keep" to true and repeat the current focus verbatim unless the subject has genuinely changed. Greetings and polite filler change nothing.
+
+If there is no subject yet, return an empty string for "content".`
 
 // focusExtractSchema pins the extraction output to {"keep": bool, "content":
 // string}. Both fields are required, so the response is always well-formed JSON
@@ -264,10 +268,11 @@ func (g *Gemini) Summarize(ctx context.Context, text string) (string, error) {
 	return summary, nil
 }
 
-// Extract distils the current one-sentence subject from the conversation window,
-// deciding whether the existing subject still holds. text is the full short-term
-// window (both sides of each exchange); currentSubject may be empty on the first
-// extraction. Structured JSON output is enforced via a response schema.
+// Extract distils what the conversation is currently about — its subject and the
+// entities involved — into a single concise focus sentence, deciding whether the
+// existing focus still holds. text is the full short-term window (both sides of
+// each exchange); currentSubject may be empty on the first extraction. Structured
+// JSON output is enforced via a response schema.
 func (g *Gemini) Extract(ctx context.Context, currentSubject, text string) (bool, string, error) {
 	if text == "" {
 		return false, "", fmt.Errorf("%s: extract: empty text", g.Name())
@@ -313,7 +318,7 @@ func (g *Gemini) Extract(ctx context.Context, currentSubject, text string) (bool
 // must reduce to a single sentence, so it can decide to keep, refine, or replace.
 func buildFocusPrompt(currentSubject, text string) string {
 	var b strings.Builder
-	b.WriteString("Current subject: ")
+	b.WriteString("Current topic: ")
 	if currentSubject == "" {
 		b.WriteString("(none)")
 	} else {

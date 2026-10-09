@@ -45,8 +45,9 @@ type focusStore interface {
 	InsertFocus(ctx context.Context, userID, subject string, lastTurnSeq int64) error
 }
 
-// extractor distils the current one-sentence subject from the short-term window,
-// deciding whether to keep the existing subject or replace it.
+// extractor distils a single concise focus sentence capturing the subject and
+// entities the conversation is about, deciding whether to keep the existing
+// focus or replace it.
 type extractor interface {
 	Extract(ctx context.Context, currentSubject, text string) (keep bool, subject string, err error)
 }
