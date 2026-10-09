@@ -31,15 +31,30 @@ const (
 	taskTypeRetrievalQuery    = "RETRIEVAL_QUERY"
 )
 
-// summarizeSystemPrompt asks the model to distil durable, self-contained facts
-// from a batch, rather than replay the conversation verbatim.
-const summarizeSystemPrompt = `You compress a batch of chat messages into durable, self-contained facts for a long-term memory store.
+// summarizeSystemPrompt asks the model to extract a list of atomic, self-contained
+// facts from a batch, rather than replay the conversation verbatim.
+const summarizeSystemPrompt = `You extract important, durable details from a batch of chat messages for a memory store.
+
+Return JSON with a single field:
+- "facts": an array of strings.
+
+Each fact is one atomic, self-contained memory — a single piece of information that will be stored and recalled on its own, without the surrounding conversation. It must be complete in isolation: name people and things explicitly (never "he", "she", "it", "they", or "the user above"), and include enough detail to be meaningful on its own.
 
 Rules:
-- Extract only facts worth remembering later: stable preferences, decisions, commitments, constraints, and important context.
-- Each fact must stand alone without referring to "the user above" or the conversation itself.
-- Do not narrate the conversation, restate questions, or include greetings, filler, or meta-commentary.
-- Write plain prose, one fact per sentence, as few sentences as possible. Output only the facts.`
+- One fact per array item; do not merge unrelated details into one sentence.
+- Do not repeat information across facts or restate the same thing in different words.
+- State facts directly; do not narrate the conversation, restate questions, or include greetings and filler.
+- Return an empty array if nothing in the batch is worth remembering.`
+
+// summarizeSchema pins the extraction output to {"facts": [...]}, so the
+// response is always well-formed JSON the caller can decode directly.
+var summarizeSchema = &genai.Schema{
+	Type: genai.TypeObject,
+	Properties: map[string]*genai.Schema{
+		"facts": {Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeString}},
+	},
+	Required: []string{"facts"},
+}
 
 // focusSystemPrompt asks the model to track what the current conversation is
 // about — its subject and the entities involved — returning whether to keep the
@@ -235,37 +250,46 @@ func (g *Gemini) Embed(ctx context.Context, text, taskType string) ([]float32, e
 	return resp.Embeddings[0].Values, nil
 }
 
-// Summarize distils a batch of messages into durable, self-contained facts
-// using the default chat model.
-func (g *Gemini) Summarize(ctx context.Context, text string) (string, error) {
+// Summarize distils a batch of messages into a list of atomic, self-contained
+// facts using the default chat model.
+func (g *Gemini) Summarize(ctx context.Context, text string) ([]string, error) {
 	if text == "" {
-		return "", fmt.Errorf("%s: summarize: empty text", g.Name())
+		return nil, fmt.Errorf("%s: summarize: empty text", g.Name())
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, g.timeout)
 	defer cancel()
 
-	cfg := *g.genCfg // copy so the system instruction does not leak across calls
+	cfg := *g.genCfg // copy so the system instruction and schema do not leak across calls
 	cfg.SystemInstruction = genai.NewContentFromText(summarizeSystemPrompt, genai.RoleUser)
+	cfg.ResponseMIMEType = "application/json"
+	cfg.ResponseSchema = summarizeSchema
 
 	resp, err := g.client.Models.GenerateContent(ctx, g.model, genai.Text(text), &cfg)
 	if err != nil {
-		return "", fmt.Errorf("%s: summarize: %w", g.Name(), err)
+		return nil, fmt.Errorf("%s: summarize: %w", g.Name(), err)
 	}
 
 	if fb := resp.PromptFeedback; fb != nil && fb.BlockReason != "" {
-		return "", fmt.Errorf("%s: summarize: prompt blocked: %s", g.Name(), fb.BlockReason)
+		return nil, fmt.Errorf("%s: summarize: prompt blocked: %s", g.Name(), fb.BlockReason)
 	}
 	if len(resp.Candidates) == 0 {
-		return "", fmt.Errorf("%s: summarize: no candidates in response", g.Name())
+		return nil, fmt.Errorf("%s: summarize: no candidates in response", g.Name())
 	}
 
-	summary := resp.Text()
-	if summary == "" {
-		return "", fmt.Errorf("%s: summarize: empty response", g.Name())
+	raw := strings.TrimSpace(resp.Text())
+	if raw == "" {
+		return nil, fmt.Errorf("%s: summarize: empty response", g.Name())
 	}
 
-	return summary, nil
+	var out struct {
+		Facts []string `json:"facts"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("%s: summarize: decode response: %w", g.Name(), err)
+	}
+
+	return out.Facts, nil
 }
 
 // Extract distils what the conversation is currently about — its subject and the

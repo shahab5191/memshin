@@ -59,15 +59,15 @@ type promotionStore interface {
 	MarkPromoted(ctx context.Context, userID, stage string, turnIDs []uuid.UUID, version int32) (int64, error)
 }
 
-// vectorStore is the mid-term vector backend: write a per-release summary and
-// read the summaries most relevant to a query.
+// vectorStore is the mid-term vector backend: replace a release's facts and read
+// the facts most relevant to a query.
 type vectorStore interface {
-	Upsert(ctx context.Context, userID, summary string, embedding []float32, startSeq, endSeq int64, publishVersion int32) error
+	ReplaceFacts(ctx context.Context, userID string, facts []repository.Fact, startSeq, endSeq int64, publishVersion int32) error
 	Search(ctx context.Context, userID string, embedding []float32, limit int) ([]repository.MemoryItem, error)
 }
 
 type summarizer interface {
-	Summarize(ctx context.Context, text string) (string, error)
+	Summarize(ctx context.Context, text string) ([]string, error)
 }
 
 type embedder interface {

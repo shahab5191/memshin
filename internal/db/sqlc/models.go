@@ -43,4 +43,5 @@ type MidTermMemory struct {
 	StartSeq       int64
 	EndSeq         int64
 	CreatedAt      time.Time
+	FactIndex      int32
 }

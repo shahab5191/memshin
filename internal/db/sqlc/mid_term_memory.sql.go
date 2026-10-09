@@ -11,6 +11,58 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
+const deleteFacts = `-- name: DeleteFacts :exec
+DELETE FROM mid_term_memory
+WHERE user_id = $1 AND publish_version = $2
+`
+
+type DeleteFactsParams struct {
+	UserID         string
+	PublishVersion int32
+}
+
+// DeleteFacts removes every fact stored for one release. It is the first half of
+// the replace-set write: the caller deletes then re-inserts within a transaction,
+// so a replayed summarisation that yields a different fact count never leaves
+// stale rows behind.
+func (q *Queries) DeleteFacts(ctx context.Context, arg DeleteFactsParams) error {
+	_, err := q.db.Exec(ctx, deleteFacts, arg.UserID, arg.PublishVersion)
+	return err
+}
+
+const insertFact = `-- name: InsertFact :exec
+INSERT INTO mid_term_memory
+    (user_id, publish_version, fact_index, summary, embedding, start_seq, end_seq)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7)
+`
+
+type InsertFactParams struct {
+	UserID         string
+	PublishVersion int32
+	FactIndex      int32
+	Summary        string
+	Embedding      pgvector.Vector
+	StartSeq       int64
+	EndSeq         int64
+}
+
+// InsertFact writes one atomic fact for a release. fact_index orders the facts
+// of a release; the composite key (user_id, publish_version, fact_index) makes
+// each fact its own retrievable row with its own embedding.
+func (q *Queries) InsertFact(ctx context.Context, arg InsertFactParams) error {
+	_, err := q.db.Exec(ctx, insertFact,
+		arg.UserID,
+		arg.PublishVersion,
+		arg.FactIndex,
+		arg.Summary,
+		arg.Embedding,
+		arg.StartSeq,
+		arg.EndSeq,
+	)
+	return err
+}
+
 const searchMemory = `-- name: SearchMemory :many
 SELECT
     user_id,
@@ -40,9 +92,9 @@ type SearchMemoryRow struct {
 	Similarity     float64
 }
 
-// SearchMemory returns the summaries most similar to the query embedding,
-// always scoped to one user. similarity is cosine similarity: the <=> operator
-// yields cosine distance, so 1 - distance restores the [0,1] scale where 1 is
+// SearchMemory returns the facts most similar to the query embedding, always
+// scoped to one user. similarity is cosine similarity: the <=> operator yields
+// cosine distance, so 1 - distance restores the [0,1] scale where 1 is
 // identical. The caller applies a minimum-similarity threshold.
 func (q *Queries) SearchMemory(ctx context.Context, arg SearchMemoryParams) ([]SearchMemoryRow, error) {
 	rows, err := q.db.Query(ctx, searchMemory, arg.Embedding, arg.UserID, arg.LimitRows)
@@ -69,40 +121,4 @@ func (q *Queries) SearchMemory(ctx context.Context, arg SearchMemoryParams) ([]S
 		return nil, err
 	}
 	return items, nil
-}
-
-const upsertMemory = `-- name: UpsertMemory :exec
-INSERT INTO mid_term_memory
-    (user_id, publish_version, summary, embedding, start_seq, end_seq)
-VALUES
-    ($1, $2, $3, $4, $5, $6)
-ON CONFLICT (user_id, publish_version) DO UPDATE SET
-    summary    = EXCLUDED.summary,
-    embedding  = EXCLUDED.embedding,
-    start_seq  = EXCLUDED.start_seq,
-    end_seq    = EXCLUDED.end_seq
-`
-
-type UpsertMemoryParams struct {
-	UserID         string
-	PublishVersion int32
-	Summary        string
-	Embedding      pgvector.Vector
-	StartSeq       int64
-	EndSeq         int64
-}
-
-// UpsertMemory writes (or overwrites) the mid-term summary for one release. The
-// composite key (user_id, publish_version) makes a replayed or stale write an
-// in-place update, never a duplicate row.
-func (q *Queries) UpsertMemory(ctx context.Context, arg UpsertMemoryParams) error {
-	_, err := q.db.Exec(ctx, upsertMemory,
-		arg.UserID,
-		arg.PublishVersion,
-		arg.Summary,
-		arg.Embedding,
-		arg.StartSeq,
-		arg.EndSeq,
-	)
-	return err
 }

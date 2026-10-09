@@ -127,23 +127,30 @@ func (mtm *MidTermMemory) HandlePromotion(ctx context.Context, event promotion.E
 }
 
 func (mtm *MidTermMemory) summarizeAndStore(ctx context.Context, userID string, batch repository.Batch) error {
-	summary, err := mtm.summarize.Summarize(ctx, renderMessages(batch.Messages))
+	facts, err := mtm.summarize.Summarize(ctx, renderMessages(batch.Messages))
 	if err != nil {
 		return fmt.Errorf("%s: summarize batch: %w", mtm.Name(), err)
 	}
-
-	embedding, err := mtm.embed.Embed(ctx, summary, retrievalDocumentTaskType)
-	if err != nil {
-		return fmt.Errorf("%s: embed summary: %w", mtm.Name(), err)
+	if len(facts) == 0 {
+		return nil // nothing worth remembering in this batch
 	}
 
 	// Messages arrive seq-ordered, so the first and last elements are the
-	// lowest and highest seq in the batch.
+	// lowest and highest seq in the batch. Every fact shares that range.
 	first := batch.Messages[0].Seq
 	last := batch.Messages[len(batch.Messages)-1].Seq
 
-	if err := mtm.vector.Upsert(ctx, userID, summary, embedding, first, last, batch.Version); err != nil {
-		return fmt.Errorf("%s: store summary: %w", mtm.Name(), err)
+	stored := make([]repository.Fact, 0, len(facts))
+	for _, fact := range facts {
+		embedding, err := mtm.embed.Embed(ctx, fact, retrievalDocumentTaskType)
+		if err != nil {
+			return fmt.Errorf("%s: embed fact: %w", mtm.Name(), err)
+		}
+		stored = append(stored, repository.Fact{Text: fact, Embedding: embedding})
+	}
+
+	if err := mtm.vector.ReplaceFacts(ctx, userID, stored, first, last, batch.Version); err != nil {
+		return fmt.Errorf("%s: store facts: %w", mtm.Name(), err)
 	}
 
 	return nil
