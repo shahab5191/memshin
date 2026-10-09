@@ -15,8 +15,13 @@ import (
 
 const (
 	defaultGeminiModel    = "gemini-2.5-flash"
-	defaultEmbeddingModel = "text-embedding-004"
+	defaultEmbeddingModel = "gemini-embedding-001"
 	defaultGeminiTimeout  = 60 * time.Second
+
+	// embeddingDimension is the fixed output dimensionality requested from the
+	// embedding model. It must match the vector(N) column in the mid_term_memory
+	// migration (00004).
+	embeddingDimension = 768
 )
 
 // Embedding task types. The store-side and search-side embeddings must use the
@@ -211,7 +216,10 @@ func (g *Gemini) Embed(ctx context.Context, text, taskType string) ([]float32, e
 	defer cancel()
 
 	resp, err := g.client.Models.EmbedContent(ctx, g.embeddingModel,
-		genai.Text(text), &genai.EmbedContentConfig{TaskType: taskType})
+		genai.Text(text), &genai.EmbedContentConfig{
+			TaskType:            taskType,
+			OutputDimensionality: genai.Ptr[int32](embeddingDimension),
+		})
 	if err != nil {
 		return nil, fmt.Errorf("%s: embed content: %w", g.Name(), err)
 	}

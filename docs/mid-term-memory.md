@@ -4,7 +4,7 @@ Status: **spec** — not yet implemented.
 
 This document specifies the mid-term memory layer: it consumes the bounded
 batches short-term releases, summarizes each batch with the LLM, embeds the
-summary with Gemini `text-embedding-004`, stores it in a `pgvector` table in the
+summary with Gemini `gemini-embedding-001`, stores it in a `pgvector` table in the
 existing Postgres, and retrieves the summaries relevant to a request — always
 scoped to the requesting user.
 
@@ -28,7 +28,7 @@ is specified in a future document.
 | Decision | Value |
 |---|---|
 | Vector store | `pgvector` extension in the existing Postgres |
-| Embedding model | Gemini `text-embedding-004`, 768 dimensions |
+| Embedding model | Gemini `gemini-embedding-001`, 768 dimensions |
 | Summary granularity | one summary per batch |
 | Idempotency key | `(user_id, publish_version)` |
 | Chat-range reference | `start_seq` / `end_seq` (bigint, `conversation.seq`) |
@@ -82,8 +82,8 @@ Notes:
 
 - The composite primary key `(user_id, publish_version)` makes the upsert
   natural and guarantees one summary row per release per user.
-- `embedding` dimension `768` is fixed to `text-embedding-004`. If the model
-  changes, the migration changes with it.
+- `embedding` dimension `768` is fixed via `outputDimensionality=768` on
+  `gemini-embedding-001`. If the model changes, the migration changes with it.
 - The HNSW index is approximate; for small data it may be skipped or replaced
   by an exact scan. The per-user `user_id` filter is the real access path for
   the common case.
@@ -98,7 +98,7 @@ Add to the Gemini provider in `internal/llm/gemini.go`:
 Embed(ctx context.Context, text, taskType string) ([]float32, error)
 ```
 
-- Model: `EMBEDDING_MODEL`, default `text-embedding-004`.
+- Model: `EMBEDDING_MODEL`, default `gemini-embedding-001`.
 - Implemented with `client.Models.EmbedContent(ctx, model, genai.Text(text),
   &genai.EmbedContentConfig{TaskType: taskType})`.
 - Returns `resp.Embeddings[0].Values` (a `[]float32` of length 768).
@@ -341,7 +341,7 @@ type embedder interface {
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EMBEDDING_MODEL` | `text-embedding-004` | Embedding model for store + search |
+| `EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for store + search |
 | (future) `MEMORY_TOP_K` | `5` | Max summaries injected per request |
 | (future) `MEMORY_MIN_SIMILARITY` | `0.3` | Drop results below this cosine similarity |
 
