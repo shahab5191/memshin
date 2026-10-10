@@ -10,11 +10,10 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/shahab5191/memshin/internal/api"
+	"github.com/shahab5191/memshin/internal/app"
 	"github.com/shahab5191/memshin/internal/db"
 	"github.com/shahab5191/memshin/internal/llm"
-	"github.com/shahab5191/memshin/internal/memory"
 	"github.com/shahab5191/memshin/internal/pipeline"
-	"github.com/shahab5191/memshin/internal/repository"
 )
 
 // defaultPromotionWorkers is the number of dispatcher goroutines draining the
@@ -68,24 +67,13 @@ func main() {
 	}
 	log.Println("llm provider initialized:", provider.Name())
 
-	memoryList := make([]memory.MemoryLayer, 0)
-	memoryStore := repository.NewConversations(pool)
-	memoryList = append(memoryList, memory.NewShortTermMemory(memoryStore))
-
 	// Focus sits between short-term and mid-term. In RequestProcess it must run
 	// before mid-term so FocusSubject is set for the retrieval query; in
 	// ResponseProcess it must run after short-term so the turn is appended before
-	// focus rings its doorbell.
-	focusStore := repository.NewFocus(pool)
-	memoryList = append(memoryList, memory.NewFocusMemory(memoryStore, focusStore, provider))
+	// focus rings its doorbell. The shared wiring in app preserves that order.
+	mem := app.NewMemoryPipeline(pool, provider)
 
-	// Mid-term sits after short-term so it consumes what short-term releases.
-	// memoryStore doubles as the promotionStore; the Gemini provider supplies
-	// both summarization and embedding.
-	vectorStore := repository.NewMidTermMemory(pool)
-	memoryList = append(memoryList, memory.NewMidTermMemory(memoryStore, vectorStore, provider, provider))
-
-	engine := pipeline.NewEngine(memoryList, provider)
+	engine := pipeline.NewEngine(mem.Layers, provider)
 	log.Println("engine initialized")
 
 	// Promotions are published on a buffered channel; without a running

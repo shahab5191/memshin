@@ -12,7 +12,10 @@ import (
 )
 
 const (
+	// RecentMessageFloor is how many recent messages the short-term window keeps
+	// regardless of promotion, and the release condition's floor (see ReleaseBatch).
 	RecentMessageFloor = 8
+	// PromotionBatchSize is how many messages a single release hands downstream.
 	PromotionBatchSize = 8
 )
 
