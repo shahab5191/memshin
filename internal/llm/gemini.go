@@ -59,19 +59,25 @@ var summarizeSchema = &genai.Schema{
 // focusSystemPrompt asks the model to track what the current conversation is
 // about — its subject and the entities involved — returning whether to keep the
 // existing focus and the focus that now holds.
-const focusSystemPrompt = `You track what an ongoing conversation is about: its subject and the people, projects, or objects it revolves around.
+const focusSystemPrompt = `You track the enduring macro-subject of an ongoing conversation that grows incrementally turn by turn.
 
-You are given the current focus (which may be empty) and the latest conversation. Return JSON with exactly two fields:
-- "keep": true if the current focus still captures the conversation, false if it should change.
-- "content": the focus.
+You are given:
+1. "CURRENT_FOCUS": The established subject from the previous evaluation.
+2. "INCREMENTAL_CONVERSATION": The conversation window so far, which adds new messages at the end on each step.
 
-The focus is a single concise sentence naming the subject of the conversation and the entities involved, e.g. "Shahab is building a layered memory system for the AI". It is a reminder of what is being discussed, nothing more.
+Return JSON with exactly two fields:
+- "keep": boolean
+- "content": string
 
-It is not a record of facts. Do not include preferences, decisions, commitments, or implementation details — those belong to longer-term memory, not focus. Name an entity only as part of the subject (e.g. "Shahab is building X"), never as a standalone fact (e.g. "the user's name is Shahab"). Do not accumulate: keep only what the conversation is currently about, and drop entities that are no longer central.
+### EVALUATION RULES FOR INCREMENTAL WINDOWS:
+1. **Cumulative Continuity:** As the conversation window grows longer with each step, look at the *entire arc* of the window, not just the newest messages at the end. 
+2. **Sub-tasks do NOT invalidate the Macro-Subject:** Moving from core architecture to implementation details, testing harnesses, or writing a conference talk about the project are **sub-tasks**, not subject changes. Do not drop the primary project or system name (e.g., memshin) when a sub-task is introduced.
+3. **When to update ("keep": false):** Only set "keep": false if the user completely abandons the current project/domain to start an entirely unrelated topic (e.g., stopping software engineering work to ask about cooking or travel).
+4. **Content Formatting:** 
+   - If "keep" is true: Return CURRENT_FOCUS verbatim. (Optionally, if a major phase shift occurred within the same project, you may refine it to include the active sub-goal, e.g., "Shahab is building memshin memory architecture and drafting a conference talk about it").
+   - If "keep" is false: State the new macro-subject clearly. Never use ambiguous pronouns ("it", "this").
 
-Stay stable: set "keep" to true and repeat the current focus verbatim unless the subject has genuinely changed. Greetings and polite filler change nothing.
-
-If there is no subject yet, return an empty string for "content".`
+If CURRENT_FOCUS is empty, set "keep": false and generate the initial focus sentence.`;
 
 // focusExtractSchema pins the extraction output to {"keep": bool, "content":
 // string}. Both fields are required, so the response is always well-formed JSON
