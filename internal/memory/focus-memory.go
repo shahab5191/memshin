@@ -10,6 +10,10 @@ import (
 	"github.com/shahab5191/memshin/internal/promotion"
 )
 
+type focusFlight struct {
+	cancel context.CancelFunc
+}
+
 // FocusMemory holds the current one-sentence subject of a user's conversation,
 // refreshed asynchronously after every response and used by mid-term to scope
 // its retrieval query.
@@ -21,7 +25,7 @@ type FocusMemory struct {
 	// mu guards cancel; the map is the per-user single-flight mechanism, so the
 	// mutex serialises map access, never the LLM call itself.
 	mu     sync.Mutex
-	cancel map[string]context.CancelFunc
+	cancel map[string]*focusFlight
 }
 
 func NewFocusMemory(source focusSource, store focusStore, extract extractor) *FocusMemory {
@@ -29,7 +33,7 @@ func NewFocusMemory(source focusSource, store focusStore, extract extractor) *Fo
 		source:  source,
 		store:   store,
 		extract: extract,
-		cancel:  make(map[string]context.CancelFunc),
+		cancel:  make(map[string]*focusFlight),
 	}
 }
 
@@ -96,26 +100,35 @@ func (fm *FocusMemory) HandlePromotion(
 	pub promotion.Publisher,
 ) error {
 	fm.mu.Lock()
-	if cancel, ok := fm.cancel[event.UserID]; ok {
-		cancel() // supersede the in-flight extraction
+	if prev, ok := fm.cancel[event.UserID]; ok {
+		prev.cancel() // supersede the in-flight extraction
 	}
 	userCtx, cancel := context.WithCancel(ctx)
-	fm.cancel[event.UserID] = cancel
+	flight := &focusFlight{cancel: cancel}
+	fm.cancel[event.UserID] = flight
 	fm.mu.Unlock()
 
 	defer func() {
 		fm.mu.Lock()
-		delete(fm.cancel, event.UserID)
+		if fm.cancel[event.UserID] == flight {
+			delete(fm.cancel, event.UserID)
+		}
 		fm.mu.Unlock()
 	}()
 
 	subject, err := fm.store.GetFocus(userCtx, event.UserID)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 
 	window, err := fm.source.ShortTermWindow(userCtx, event.UserID, RecentMessageFloor)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return err
 	}
 	if len(window) == 0 {
